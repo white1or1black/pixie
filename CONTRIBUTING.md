@@ -15,7 +15,7 @@ the Claude Code CLI. This guide gets you set up and explains the conventions.
 ## Getting started
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/white1or1black/pixie.git
 cd pixie
 pnpm install
 pnpm tauri dev

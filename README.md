@@ -39,7 +39,7 @@ Pixie searches `PATH` plus a few common locations (`/usr/local/bin`, Homebrew, `
 ## Installation
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/white1or1black/pixie.git
 cd pixie
 
 pnpm install      # frontend dependencies
