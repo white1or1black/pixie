@@ -7,7 +7,7 @@
 ![Claude Code](https://img.shields.io/badge/Claude%20Code-CLI-orange.svg)
 ![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)
 
-![Pixie](src/assets/hero.png)
+![Pixie](src/assets/hero.svg)
 
 Pixie is a thin, fast desktop UI that drives the `claude` CLI you already have installed and authenticated. It does **not** ship its own model or API client — it spawns the Claude Code CLI as a subprocess, streams its JSON output, and renders it as a polished native app. That means everything your Claude Code session can do (tools, MCP servers, skills, plugins, context) works here too.
 

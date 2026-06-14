@@ -1,6 +1,9 @@
 import { useState } from "react";
 import type { ClaudeStatus, ModelConfig } from "../types";
 
+// Brand mark — same art as the app/README icon.
+const iconUrl = new URL("../assets/icon.svg", import.meta.url).href;
+
 interface SettingsProps {
   claudeStatus: ClaudeStatus | null;
   onRefreshStatus: () => void;
@@ -189,7 +192,10 @@ export default function Settings({
               About
             </h3>
             <div className="bg-[var(--bg-primary)] rounded-xl p-4 border border-[var(--border-color)] space-y-1">
-              <p className="text-sm text-[var(--text-primary)]">Pixie</p>
+              <div className="flex items-center gap-2">
+                <img src={iconUrl} alt="Pixie" className="w-8 h-8 rounded-lg" />
+                <p className="text-sm text-[var(--text-primary)]">Pixie</p>
+              </div>
               <p className="text-xs text-[var(--text-secondary)]">
                 A desktop AI chat application powered by the Claude CLI.
               </p>

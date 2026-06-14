@@ -11,15 +11,17 @@ import { useChat } from "./hooks/useChat";
 import { useScheduledTasks } from "./hooks/useScheduledTasks";
 import type { ModelConfig, PreviewRequest, PreviewTarget, SkillEntry, TaskRunRecord } from "./types";
 
+// Brand mark — same art as the app/README icon.
+const iconUrl = new URL("./assets/icon.svg", import.meta.url).href;
+
 function SplashScreen() {
   return (
     <div className="flex flex-col items-center justify-center h-screen bg-[var(--bg-primary)]">
-      <div className="w-16 h-16 rounded-2xl bg-[var(--accent)]/10 flex items-center justify-center mb-6">
-        <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
-          <path d="M16 4C9.37 4 4 9.37 4 16s5.37 12 12 12 12-5.37 12-12S22.63 4 16 4z" fill="var(--accent)" opacity="0.15" />
-          <path d="M20.5 13.5c0 1.38-1.12 2.5-2.5 2.5s-2.5-1.12-2.5-2.5S16.62 11 18 11s2.5 1.12 2.5 2.5zM13 19c0-1.66 1.34-3 3-3s3 1.34 3 3" stroke="var(--accent)" strokeWidth="1.5" strokeLinecap="round" fill="none" />
-        </svg>
-      </div>
+      <img
+        src={iconUrl}
+        alt="Pixie"
+        className="w-16 h-16 rounded-2xl mb-6"
+      />
       <h1 className="text-xl font-semibold text-[var(--text-primary)] mb-3">Pixie</h1>
       <div className="flex items-center gap-2">
         <div className="w-4 h-4 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" />
