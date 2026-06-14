@@ -451,7 +451,7 @@ export function useChat(modelConfig: ModelConfig) {
     if (!activeWorkspaceId) return "";
     const id = generateId();
     const conv: Conversation = {
-      id, title: "New Chat", messages: [],
+      id, title: "New Agent", messages: [],
       createdAt: Date.now(), updatedAt: Date.now(),
     };
     setConversations((prev) => [conv, ...prev]);
@@ -635,6 +635,40 @@ export function useChat(modelConfig: ModelConfig) {
     }
   }, [activeWorkspaceId]);
 
+  // Optimistically surface a just-kicked-off scheduled run as a "Running…"
+  // placeholder conversation in its workspace and navigate there. Keyed by the
+  // conversation_id the backend returns synchronously from run-now, so the
+  // placeholder is seamlessly replaced when addScheduledRun fires on completion.
+  const addRunningTask = useCallback(
+    (opts: { id: string; taskName: string; prompt: string; workspace: string }) => {
+      const now = Date.now();
+      const conv: Conversation = {
+        id: opts.id,
+        title: opts.taskName || generateTitle(opts.prompt),
+        createdAt: now,
+        updatedAt: now,
+        messages: [
+          { id: generateId(), role: "user", content: opts.prompt, timestamp: now, status: "done" },
+          { id: generateId(), role: "assistant", content: "Running…", timestamp: now, status: "streaming" },
+        ],
+      };
+      // Save the current workspace's conversations, switch to the task's
+      // workspace, and surface the placeholder there.
+      setAllConversations((prev) => {
+        const saved = { ...prev, [activeWorkspaceId ?? ""]: conversations };
+        const list = saved[opts.workspace] ?? [];
+        const without = list.filter((c) => c.id !== conv.id);
+        return { ...saved, [opts.workspace]: [conv, ...without] };
+      });
+      const targetList = (allConversations[opts.workspace] ?? []).filter((c) => c.id !== conv.id);
+      setConversations([conv, ...targetList]);
+      setActiveWorkspaceId(opts.workspace);
+      setActiveId(conv.id);
+      setError(null);
+    },
+    [activeWorkspaceId, conversations, allConversations]
+  );
+
   const refreshClaudeStatus = useCallback(async () => {
     try {
       const status = await invoke<ClaudeStatus>("check_claude_available");
@@ -675,5 +709,6 @@ export function useChat(modelConfig: ModelConfig) {
     refreshClaudeStatus,
     clearError,
     addScheduledRun,
+    addRunningTask,
   };
 }

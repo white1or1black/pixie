@@ -100,6 +100,7 @@ export default function App() {
     refreshClaudeStatus,
     clearError,
     addScheduledRun,
+    addRunningTask,
   } = useChat(modelConfig);
 
   const {
@@ -296,7 +297,23 @@ export default function App() {
             onUpdate={updateTask}
             onDelete={deleteTask}
             onToggle={toggleTask}
-            onRunNow={runTaskNow}
+            onRunNow={async (taskId) => {
+              try {
+                const convId = await runTaskNow(taskId);
+                const task = scheduledTasks.find((t) => t.id === taskId);
+                if (task && convId) {
+                  addRunningTask({
+                    id: convId,
+                    taskName: task.name,
+                    prompt: task.prompt,
+                    workspace: task.workspace,
+                  });
+                  setMainView("chat");
+                }
+              } catch (e) {
+                console.error("run now failed", e);
+              }
+            }}
             onClose={() => setMainView("chat")}
           />
         )}

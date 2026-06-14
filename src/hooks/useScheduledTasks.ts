@@ -92,8 +92,10 @@ export function useScheduledTasks() {
   );
 
   const runNow = useCallback(async (taskId: string) => {
-    // Manual run does not advance the schedule.
-    await invoke<string>("run_scheduled_task_now", { taskId });
+    // Manual run does not advance the schedule. Returns the conversation_id the
+    // backend generated for the run, so the caller can surface a placeholder
+    // session immediately (it becomes the completed run's id).
+    return await invoke<string>("run_scheduled_task_now", { taskId });
   }, []);
 
   return { tasks, runs, refresh, create, update, remove, toggle, runNow };

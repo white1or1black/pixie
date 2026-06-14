@@ -18,6 +18,7 @@ const SUGGESTED: { repo: string; label: string }[] = [
 ];
 
 const CUSTOM_TAB = "__add_custom__";
+const INSTALLED_TAB = "__installed__";
 
 function formatCount(n?: number): string {
   if (!n) return "";
@@ -80,7 +81,11 @@ export default function MarketplacePanel({ onClose, onSkillsChanged }: Marketpla
   }, [marketplaces]);
 
   // Keep activeRepo valid as tabs change (e.g. after a remove).
-  if (!tabs.some((t) => t.repo === activeRepo) && activeRepo !== CUSTOM_TAB) {
+  if (
+    activeRepo !== INSTALLED_TAB &&
+    activeRepo !== CUSTOM_TAB &&
+    !tabs.some((t) => t.repo === activeRepo)
+  ) {
     setActiveRepo(tabs[0]?.repo ?? CUSTOM_TAB);
   }
 
@@ -203,6 +208,21 @@ export default function MarketplacePanel({ onClose, onSkillsChanged }: Marketpla
 
         {/* Tabs */}
         <div className="shrink-0 flex items-center gap-1 px-2 border-b border-[var(--border-color)] overflow-x-auto">
+          <button
+            onClick={() => setActiveRepo(INSTALLED_TAB)}
+            className={`shrink-0 px-3 py-2 text-xs font-medium border-b-2 transition-colors ${
+              activeRepo === INSTALLED_TAB
+                ? "border-[var(--accent)] text-[var(--text-primary)]"
+                : "border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+            }`}
+          >
+            Installed
+            {catalog.installed.length > 0 && (
+              <span className="ml-1.5 inline-block min-w-4 px-1 text-center text-[10px] rounded-full bg-[var(--bg-tertiary)] text-[var(--text-secondary)] align-middle">
+                {catalog.installed.length}
+              </span>
+            )}
+          </button>
           {tabs.map((t) => {
             const added = addedRepos.has(t.repo);
             const isActive = activeRepo === t.repo;
@@ -247,7 +267,52 @@ export default function MarketplacePanel({ onClose, onSkillsChanged }: Marketpla
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto">
-          {activeRepo === CUSTOM_TAB ? (
+          {activeRepo === INSTALLED_TAB ? (
+            <div className="flex flex-col h-full">
+              {catalog.installed.length === 0 ? (
+                <div className="px-4 py-8 text-center text-xs text-[var(--text-secondary)]">
+                  No skills installed
+                </div>
+              ) : (
+                catalog.installed.map((p) => (
+                  <div
+                    key={p.pluginId}
+                    className="px-4 py-2.5 border-b border-[var(--border-color)] flex items-start gap-3"
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-[var(--text-primary)] truncate">
+                          {p.name}
+                        </span>
+                        {p.version && (
+                          <span className="text-[10px] text-[var(--text-secondary)] opacity-70">
+                            v{p.version}
+                          </span>
+                        )}
+                      </div>
+                      {p.description && (
+                        <p className="text-xs text-[var(--text-secondary)] mt-0.5 line-clamp-2">
+                          {p.description}
+                        </p>
+                      )}
+                      {p.marketplaceName && (
+                        <p className="text-[10px] text-[var(--text-secondary)] opacity-60 mt-0.5">
+                          {p.marketplaceName}
+                        </p>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => uninstall(p)}
+                      disabled={busy !== null}
+                      className="shrink-0 px-3 py-1.5 rounded-lg text-xs bg-[var(--bg-tertiary)] text-[var(--text-primary)] hover:text-red-400 disabled:opacity-50 transition-colors"
+                    >
+                      {busy === `uninstall:${p.name}` ? "…" : "Uninstall"}
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          ) : activeRepo === CUSTOM_TAB ? (
             <div className="p-6">
               <h3 className="text-sm font-medium text-[var(--text-primary)] mb-2">
                 Add a custom marketplace
