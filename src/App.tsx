@@ -60,15 +60,15 @@ export default function App() {
   // this; New Agent / selecting a conversation returns to "chat".
   const [mainView, setMainView] = useState<"chat" | "tasks" | "skills" | "settings">("chat");
   const [theme, setTheme] = useState<"dark" | "light">(() => {
-    const stored = localStorage.getItem("agent-cli-theme");
+    const stored = localStorage.getItem("pixie-theme");
     return (stored as "dark" | "light") ?? "dark";
   });
   const [systemPrompt, setSystemPrompt] = useState(() => {
-    return localStorage.getItem("agent-cli-system-prompt") ?? "";
+    return localStorage.getItem("pixie-system-prompt") ?? "";
   });
   const [modelConfig, setModelConfig] = useState<ModelConfig>(() => {
     try {
-      const stored = localStorage.getItem("agent-cli-model-config");
+      const stored = localStorage.getItem("pixie-model-config");
       return stored ? JSON.parse(stored) : {};
     } catch {
       return {};
@@ -137,15 +137,15 @@ export default function App() {
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
-    localStorage.setItem("agent-cli-theme", theme);
+    localStorage.setItem("pixie-theme", theme);
   }, [theme]);
 
   useEffect(() => {
-    localStorage.setItem("agent-cli-system-prompt", systemPrompt);
+    localStorage.setItem("pixie-system-prompt", systemPrompt);
   }, [systemPrompt]);
 
   useEffect(() => {
-    localStorage.setItem("agent-cli-model-config", JSON.stringify(modelConfig));
+    localStorage.setItem("pixie-model-config", JSON.stringify(modelConfig));
   }, [modelConfig]);
 
   // Load skills for the skills picker: user-level always, project-level when a

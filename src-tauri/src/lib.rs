@@ -1057,7 +1057,7 @@ async fn check_claude_available() -> Result<ClaudeStatus, String> {
 // ---------------------------------------------------------------------------
 
 fn get_data_dir(_app: &AppHandle) -> Result<PathBuf, String> {
-    let dirs = directories::ProjectDirs::from("com", "agentcli", "Agent CLI")
+    let dirs = directories::ProjectDirs::from("com", "pixie", "Pixie")
         .ok_or_else(|| "Failed to determine app data directory".to_string())?;
     Ok(dirs.data_dir().to_path_buf())
 }

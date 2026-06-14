@@ -19,7 +19,7 @@ import type {
   TaskRunRecord,
 } from "../types";
 
-const DATA_KEY = "agent-cli-data";
+const DATA_KEY = "pixie-data";
 
 interface AppData {
   workspaces: WorkspaceState[];
@@ -675,15 +675,6 @@ export function useChat(modelConfig: ModelConfig) {
       setClaudeStatus(status);
     } catch {
       setClaudeStatus({ available: false, error: "Failed to check" });
-    }
-  }, []);
-
-  // Clean up old single-workspace data migration
-  useEffect(() => {
-    const oldKey = "agent-cli-conversations";
-    const oldData = localStorage.getItem(oldKey);
-    if (oldData) {
-      localStorage.removeItem(oldKey);
     }
   }, []);
 
