@@ -1,29 +1,47 @@
 # Pixie
 
-> A native desktop workspace for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — multi-workspace agentic chat, skills, a plugin marketplace, scheduled autonomous tasks, and an integrated file / Git / terminal / browser panel. Built with Tauri v2, React, TypeScript, and Rust.
+> A native desktop workspace for **pluggable AI agents** — run autonomous agents against any folder, swap engines per session, and watch them work in real time. Built with Tauri v2, React, TypeScript, and Rust.
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 ![Tauri](https://img.shields.io/badge/Tauri-v2-blue.svg)
-![Claude Code](https://img.shields.io/badge/Claude%20Code-CLI-orange.svg)
+![Agents](https://img.shields.io/badge/engines-Claude%20%7C%20Cursor-orange.svg)
 ![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)
 
 ![Pixie](src/assets/hero.svg)
 
-Pixie is a thin, fast desktop UI that drives the `claude` CLI you already have installed and authenticated. It does **not** ship its own model or API client — it spawns the Claude Code CLI as a subprocess, streams its JSON output, and renders it as a polished native app. That means everything your Claude Code session can do (tools, MCP servers, skills, plugins, context) works here too.
+Pixie is a thin, fast desktop shell for **agent CLIs you already have installed**. It does not ship its own model or API client — it spawns an external agent process, streams its JSON output, and renders it as a polished native app.
+
+Each conversation binds to an **engine** (today: [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [Cursor Agent](https://cursor.com/docs/cli/overview)). You can mix engines across workspaces and sessions: one chat on Claude, another on Cursor, both running in parallel.
+
+Use Pixie for research, writing, ops, personal automation, or software work — wherever a headless agent CLI can act on files and tools in a folder you choose.
 
 ---
 
 ## Highlights
 
-- **Multi-workspace chat** — Add any number of project folders. Each workspace becomes the working directory for its own set of conversations, and several chats can stream in parallel.
-- **Live agent activity** — Streaming markdown with syntax highlighting, plus real-time cards for every tool call and its result, extended-thinking text, and a running token / cost / duration readout.
-- **Conversation continuity** — Follow-up messages resume the same Claude Code session, so context carries across turns.
-- **Skills picker** — A ✨ picker in the composer lists your user, project, and plugin skills and inserts a `/skill-name` invocation.
-- **Plugin marketplace** — Browse, add, and remove marketplaces and install / uninstall plugins, all through the official `claude plugin` commands.
-- **Scheduled tasks** — Run prompts on a schedule (daily, weekdays, or every N minutes / hours) headlessly against a workspace. Results land back in the sidebar like any chat, with desktop notifications.
-- **Workspace dev panel** — A resizable side panel with five tabs: **Files**, **Preview** (code, markdown, images, rendered HTML), **Git** (status, history, diffs), **Browser** (preview a dev server), and a real **Terminal** (PTY-backed, your `$SHELL`).
+- **Pluggable engines** — Pick an engine per session. Claude Code and Cursor Agent are supported today; the backend is built to add more.
+- **Multi-workspace agents** — Add any number of folders as workspaces. Each becomes the agent's working directory, and many sessions can stream in parallel.
+- **Live agent activity** — Streaming markdown with syntax highlighting, real-time tool-call cards, extended-thinking text (engine-dependent), and token / cost / duration readouts.
+- **Conversation continuity** — Follow-up messages resume the same CLI session so context carries across turns.
+- **Per-engine model config** — Override API keys, models, and env vars separately for each engine in Settings.
+- **Scheduled tasks** — Run prompts on a schedule (daily, weekdays, or every N minutes / hours) headlessly against a workspace. Results appear in the sidebar with desktop notifications.
+- **Workspace panel** — A resizable side panel with **Files**, **Preview**, **Git**, **Browser**, and a real **Terminal** (PTY-backed). Handy for code; optional for non-code workflows.
+- **Skills & plugin marketplace** — Discover skills on disk, insert `/skill` invocations from the composer, and browse or install plugins from marketplaces. Pixie follows the **Claude agent standard** for skills and plugins (`.claude/skills`, `.claude-plugin/`, etc.) — a de-facto convention shared by Claude Code, Cursor Agent, and other compatible engines.
 - **System-tray resident** — Closing the window hides to the tray so scheduled tasks keep firing.
-- **Dark & light themes**, configurable model overrides, custom system prompt, and a full set of keyboard shortcuts.
+- **Dark & light themes**, system prompt, keyboard shortcuts.
+
+---
+
+## Supported engines
+
+| Engine | CLI | Notes |
+| --- | --- | --- |
+| **Claude Code** | `claude` | Reference implementation; skills, plugins, MCP |
+| **Cursor Agent** | `cursor-agent` / `agent` | Multi-model loops; supports the same skills & plugin ecosystem |
+
+Both engines speak the same **skills / marketplace conventions** (Claude-format `SKILL.md`, plugin marketplaces, `/skill-name` invocations). Pixie surfaces them engine-agnostically in the UI.
+
+Install **at least one** engine and authenticate it before using Pixie. See [Prerequisites](#prerequisites).
 
 ---
 
@@ -32,9 +50,11 @@ Pixie is a thin, fast desktop UI that drives the `claude` CLI you already have i
 - [Node.js](https://nodejs.org/) v18 or newer
 - [pnpm](https://pnpm.io/) (`npm install -g pnpm`)
 - A [Rust](https://www.rust-lang.org/tools/install) stable toolchain
-- The [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code), installed **and authenticated** (`claude` on your `PATH`)
+- **One or more agent CLIs**, installed and authenticated:
+  - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — `claude` on your `PATH`
+  - [Cursor Agent CLI](https://cursor.com/docs/cli/overview) — `cursor-agent` or `agent` on your `PATH`
 
-Pixie searches `PATH` plus a few common locations (`/usr/local/bin`, Homebrew, `~/.local/bin`, nvm directories) for the `claude` binary, and it sources your interactive login shell so that env vars such as `ANTHROPIC_API_KEY` are picked up even when launched from a `.app` bundle.
+Pixie searches `PATH` plus common locations (`/usr/local/bin`, Homebrew, `~/.local/bin`, nvm, `~/.cursor/bin`) for engine binaries. It sources your interactive login shell so env vars (`ANTHROPIC_*`, `CURSOR_*`, etc.) are picked up even when launched from a `.app` bundle.
 
 ## Installation
 
@@ -58,18 +78,19 @@ pnpm tauri build                       # all bundle formats for your OS
 pnpm tauri build --debug --bundles app # a quick debug .app / executable
 ```
 
-> **Note** — Pixie launches Claude Code with `--dangerously-skip-permissions` so it can act fully autonomously within the selected workspace. Only point it at projects you trust it to read and modify. See [Security & data](#security--data).
+> **Note** — Engines run in headless mode with permission prompts skipped (`--dangerously-skip-permissions` for Claude, `--force` for Cursor) so agents can act autonomously within the selected workspace. Only point Pixie at folders you trust the agent to read and modify. See [Security & data](#security--data).
 
 ---
 
 ## Usage
 
-1. **Add a workspace** — Click the workspace switcher in the sidebar (top-left) → *Add workspace*, then pick a project folder. This folder is the working directory Claude Code runs in.
-2. **Start chatting** — Type a message in the composer and press `Enter`. The first message starts a new session; later messages resume it.
-3. **Watch it work** — Tool calls, their results, the model's extended thinking, and token/cost totals update live beneath the reply.
-4. **Open the dev panel** — Toggle the panel button in the header to browse files, read a diff, run commands in the terminal, or preview a running dev server.
-5. **Use skills** — Click the ✨ button in the composer to browse and insert `/skill` invocations, or open **Skills** from the sidebar to install plugins from a marketplace.
-6. **Automate** — Open **Scheduled Tasks** to register a prompt that runs on a schedule. Completed runs appear in the sidebar and trigger a desktop notification.
+1. **Add a workspace** — Sidebar → workspace switcher → *Add workspace*, then pick a folder. This is the agent's working directory (project, notes, ops scripts, anything on disk).
+2. **Choose an engine** — Use the **Engine** dropdown in the sidebar (default for new sessions) or rely on each conversation's bound engine.
+3. **Start an agent** — Type a message and press `Enter`. The first message starts a new session; later messages resume it.
+4. **Watch it work** — Tool calls, results, thinking text, and usage update live beneath the reply.
+5. **Open the workspace panel** — Toggle the panel in the header for files, diffs, terminal, and previews when you need them.
+6. **Skills & plugins** — Click ✨ in the composer to pick a `/skill` invocation, or open **Skills** in the sidebar to manage plugin marketplaces. Works with any engine that follows the Claude agent skills standard (Claude Code, Cursor, etc.).
+7. **Automate** — **Scheduled Tasks** runs prompts on a timer. Completed runs appear in the sidebar and notify you.
 
 ### Keyboard shortcuts
 
@@ -86,7 +107,7 @@ pnpm tauri build --debug --bundles app # a quick debug .app / executable
 
 ## Architecture
 
-Pixie is a standard Tauri v2 app: a Rust backend that owns process and PTY lifecycle, plus a React frontend that talks to it over Tauri's IPC bridge.
+Pixie is a Tauri v2 app: a Rust backend that owns process and PTY lifecycle, plus a React frontend over the IPC bridge.
 
 ```
 ┌───────────────────────────────────────────────────────┐
@@ -100,36 +121,37 @@ Pixie is a standard Tauri v2 app: a Rust backend that owns process and PTY lifec
 ┌──────────────────────────┴────────────────────────────┐
 │  Backend  ·  Rust (tokio)                              │
 │                                                        │
-│  Chat         send_message / stop_generation           │
+│  Chat         send_message(engine) / stop_generation   │
+│  Engines      check_engines_available / model config   │
 │  Workspaces   select / set_active / list_directory     │
-│  Git          git_status / git_log / git_diff          │
-│  Files        read_file_content                        │
-│  Terminal     pty_spawn / pty_write / pty_resize / …   │
-│  Skills       list_skills                              │
-│  Plugins      plugin_marketplace_* / plugin_install /… │
-│  Schedules    create / update / delete / toggle / run  │
+│  Git / Files / Terminal / Skills / Plugins / Schedules │
 │                                                        │
-│  Events emitted to the frontend                        │
-│    claude-response · claude-done · claude-error        │
-│    claude-tool · claude-thinking · claude-thinking-text│
-│    claude-usage · task-run-complete · pty-output       │
+│  Events: agent-response · agent-tool · agent-done · …    │
 └──────────────────────────┬────────────────────────────┘
-                           │  tokio::process / portable-pty
+                           │  tokio::process (one child per conversation)
 ┌──────────────────────────┴────────────────────────────┐
-│  Claude Code CLI (external)                            │
-│  claude --print --output-format stream-json --verbose  │
-│         --session-id <id> --dangerously-skip-permissions│
+│  engine/  ·  pluggable agent backends                  │
+│    claude.rs   Claude Code  (--print stream-json)      │
+│    cursor.rs   Cursor Agent (--print stream-json)      │
+│    mod.rs      NormalizedEvent · spawn · parse_line    │
 └───────────────────────────────────────────────────────┘
 ```
 
 How a message flows:
 
-- The frontend calls `invoke("send_message", …)`. The backend spawns one Claude Code process **per conversation** (so multiple chats run concurrently) and returns immediately.
-- Each streamed JSON line is parsed into an event: assistant text deltas, tool-use starts / results, thinking text, usage, and the final `result`. The backend re-emits each as a typed Tauri event.
-- The frontend's `useChat` hook subscribes to those events and patches the active conversation in real time.
-- `stop_generation` sends `SIGTERM` to the child process via a pid registry, so stopping never has to wait on the streaming lock.
+- The frontend calls `invoke("send_message", { engine, conversationId, … })`. The backend picks the engine, spawns one process **per conversation**, and returns immediately.
+- Each NDJSON line is parsed into a **normalized event** (text delta, tool start/result, usage, done). The backend emits unified `agent-*` Tauri events.
+- `useChat` routes updates by `conversation_id` so parallel sessions stay independent.
+- `stop_generation` kills the child by PID without blocking the stream reader.
 
-**Where state lives:** conversations, workspaces, theme, system prompt, and model config are stored in the browser's `localStorage`. Scheduled tasks and run history are persisted by the backend to the app data directory. The backend is otherwise stateless about chat content — Claude Code itself owns session history via `--session-id` / `--resume`.
+**Where state lives:** conversations (including per-session `engine`), workspaces, theme, and per-engine model config live in `localStorage`. Scheduled tasks and run history are persisted under the OS app-data directory. Session history is owned by each engine's CLI (`--session-id` / `--resume` for Claude; Cursor session ids tracked by Pixie).
+
+### Adding a new engine
+
+1. Add the engine id to `ENGINE_IDS` in `src-tauri/src/engine/mod.rs` and `AGENT_ENGINES` in `src/types.ts`.
+2. Implement `engine/<name>.rs`: `check_available`, `spawn_single`, `spawn_continue`, `parse_line`.
+3. Wire dispatch in `engine/mod.rs`.
+4. Add model-config fields in `ENGINE_MODEL_FIELDS` if the engine needs env overrides.
 
 ---
 
@@ -138,38 +160,22 @@ How a message flows:
 ```
 pixie/
 ├── src/                         # Frontend (React + TypeScript)
-│   ├── components/
-│   │   ├── ChatView.tsx         # Message list with auto-scroll
-│   │   ├── MessageBubble.tsx    # Markdown + code + tool/thinking/usage
-│   │   ├── InputBar.tsx         # Composer with skill picker
-│   │   ├── SkillsDropdown.tsx   # Filterable /skill picker
-│   │   ├── Sidebar.tsx          # Workspaces + conversations
-│   │   ├── RightPanel.tsx       # Files / Preview / Git / Browser / Terminal
-│   │   ├── Terminal.tsx         # xterm.js over a Tauri PTY
-│   │   ├── MarketplacePanel.tsx # Plugin marketplaces + install
-│   │   ├── ScheduledTasksPanel.tsx
-│   │   └── Settings.tsx
-│   ├── hooks/
-│   │   ├── useChat.ts           # Chat state + Tauri IPC event wiring
-│   │   └── useScheduledTasks.ts # Scheduled-task CRUD + refresh
-│   ├── preview.ts               # Shared "is this previewable?" helpers
-│   ├── App.tsx                  # Root layout + view routing
-│   ├── main.tsx                 # React entry
-│   ├── index.css                # Tailwind + theme CSS variables
-│   └── types.ts                 # Shared TS interfaces
-├── src-tauri/                   # Backend (Rust + Tauri v2)
+│   ├── components/              # ChatView, Sidebar, Settings, RightPanel, …
+│   ├── hooks/                   # useChat, useScheduledTasks
+│   ├── App.tsx
+│   └── types.ts                 # EngineModelConfigs, AgentEngineId, …
+├── src-tauri/
 │   ├── src/
-│   │   ├── main.rs              # Binary entry point
-│   │   ├── lib.rs               # Tauri commands, scheduler, tray, state
-│   │   ├── claude.rs            # Claude CLI process + stream parsing
-│   │   └── pty.rs               # PTY sessions (portable-pty)
-│   ├── capabilities/default.json
-│   ├── icons/
-│   ├── Cargo.toml
+│   │   ├── engine/              # Pluggable agent backends
+│   │   │   ├── mod.rs           # NormalizedEvent, AgentProcess, dispatch
+│   │   │   ├── claude.rs
+│   │   │   ├── cursor.rs
+│   │   │   └── shared.rs        # Shell env, binary discovery
+│   │   ├── lib.rs               # Tauri commands, scheduler, tray
+│   │   └── pty.rs
 │   └── tauri.conf.json
 ├── package.json
-├── vite.config.ts
-└── tsconfig.json
+└── vite.config.ts
 ```
 
 ---
@@ -185,7 +191,7 @@ pnpm lint                 # ESLint
 cd src-tauri
 cargo check               # Type-check Rust
 cargo clippy              # Lint Rust
-cargo test                # Unit tests (frontmatter / skill discovery)
+cargo test                # Unit tests
 ```
 
 ### Key technologies
@@ -198,46 +204,50 @@ cargo test                # Unit tests (frontmatter / skill discovery)
 | Build tool | Vite |
 | Backend | Rust, tokio |
 | Markdown | react-markdown + remark-gfm |
-| Syntax highlighting | react-syntax-highlighter (Prism) |
 | Terminal | xterm.js + portable-pty |
-| Scheduling | chrono (local-time presets) |
+| Scheduling | chrono |
 
 ### Configuration
 
-Open **Settings** (`Ctrl/Cmd + ,`) to configure:
+Open **Settings** (`Ctrl/Cmd + ,`):
 
-- **Claude CLI status** — detected path, version, and any error.
-- **Model configuration** — override env vars passed to the CLI: `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`, and `CLAUDE_CODE_EFFORT_LEVEL`. Leave a field blank to inherit the system default.
-- **System prompt** — an optional prompt prepended to every session.
+- **Agent engines** — availability, version, and binary path for each engine.
+- **Default engine** — used when creating new sessions.
+- **Model configuration** — per-engine env overrides (collapsed by default). Claude: `ANTHROPIC_*`, `CLAUDE_CODE_*`. Cursor: `CURSOR_API_KEY`, `CURSOR_MODEL`.
+- **System prompt** — optional prompt for agent sessions.
 - **Theme** — dark or light.
 
 ---
 
 ## Security & data
 
-- Pixie runs Claude Code with `--dangerously-skip-permissions`, so the model can read and modify files and run commands in the active workspace **without per-action prompts**. Only add workspaces you are comfortable letting the agent operate on.
-- The `AskUserQuestion` tool is disabled in streaming mode because the headless runner has no channel to answer it; Claude is asked to phrase such questions as ordinary prose instead.
-- Chat content, workspaces, and settings are kept locally in `localStorage`; scheduled tasks and run history live in the OS app-data directory. Nothing is sent anywhere except to the Claude Code CLI you already run.
+- Engines run headless with auto-approved tool execution within the active workspace. Only add workspaces you trust the agent to operate on.
+- Claude's `AskUserQuestion` tool is disabled in streaming mode (no channel to answer it); the model is steered to ask in plain prose instead.
+- Chat content, workspaces, and settings stay local. Scheduled tasks and run history live in the app-data directory. Nothing is sent anywhere except through the agent CLI you configure.
+
+---
 
 ## Troubleshooting
 
-**Claude CLI not found** — The app shows a dedicated screen if it can't locate `claude`. Verify with `claude --version`; if you installed via nvm or Homebrew, make sure that bin directory is on your `PATH`. Pixie also probes Homebrew and nvm locations directly. Reopen Settings → *Refresh* after installing.
+**No engine available** — Install at least one CLI (`claude` or `cursor-agent`). Check Settings → *Refresh*. Verify with `claude --version` or `cursor-agent --version`.
 
-**`ANTHROPIC_API_KEY` / env vars not picked up** — Pixie sources your interactive login shell (`$SHELL -i -l -c env`) so vars defined in `.zprofile` / `.zshrc` (or the Bash equivalents) are inherited. Restart the app after editing those files.
+**Env vars not picked up** — Pixie sources your login shell (`$SHELL -i -l -c env`). Restart the app after editing `.zprofile` / `.zshrc`.
 
-**Build errors** — Update Rust (`rustup update`), clear the build cache (`cd src-tauri && cargo clean`), and reinstall frontend deps (`rm -rf node_modules && pnpm install`).
+**Wrong engine on a session** — Each conversation keeps its bound engine. Start a new session or pick a different default engine for new chats.
 
-**Scheduled task didn't fire** — Tasks more than 5 minutes overdue are advanced rather than caught up (to avoid a burst after sleep/close). Tasks only run while Pixie is open (closing to the tray keeps it resident). Use *Run now* to fire one immediately.
+**Build errors** — `rustup update`, `cd src-tauri && cargo clean`, `rm -rf node_modules && pnpm install`.
+
+**Scheduled task didn't fire** — Pixie must be running (tray is fine). Overdue tasks more than 5 minutes are skipped to avoid catch-up bursts. Use *Run now* to test.
 
 ---
 
 ## Contributing
 
-Contributions are welcome! The codebase is small and approachable:
+Contributions are welcome — especially new **engines** and general-agent UX improvements:
 
 1. Fork the repo and create a feature branch.
-2. Follow the existing style — Rust via `cargo fmt` / `cargo clippy`, frontend via `pnpm lint`.
-3. Keep new Tauri commands typed end-to-end (Rust struct ↔ `src/types.ts` interface).
+2. Rust: `cargo fmt` / `cargo clippy`. Frontend: `pnpm lint`.
+3. Keep Tauri commands typed end-to-end (Rust ↔ `src/types.ts`).
 4. Open a pull request describing the change.
 
 ## License

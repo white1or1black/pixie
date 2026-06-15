@@ -181,7 +181,7 @@ export interface FileEntry {
   size: number;
 }
 
-/** A Claude skill discovered on disk (user-, project- or plugin-level). */
+/** An agent skill discovered on disk (user-, project- or plugin-level). Uses the Claude agent skills standard (SKILL.md + frontmatter). */
 export interface SkillEntry {
   name: string;
   description: string;
@@ -190,7 +190,7 @@ export interface SkillEntry {
   invocation: string;
 }
 
-/** A configured Claude plugin marketplace (from `claude plugin marketplace list --json`). */
+/** A configured plugin marketplace (Claude agent standard; `claude plugin marketplace list --json`). */
 export interface MarketplaceInfo {
   name: string;
   source: string;

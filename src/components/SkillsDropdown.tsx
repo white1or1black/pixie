@@ -8,7 +8,7 @@ interface SkillsDropdownProps {
 }
 
 /**
- * Filterable, keyboard-navigable list of available Claude skills.
+ * Filterable, keyboard-navigable list of available agent skills (Claude skills standard).
  *
  * The flat selection index runs over `filtered` in display order (project
  * skills first, then user skills), so arrow/Enter navigation stays a simple
