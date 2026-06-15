@@ -7,6 +7,7 @@ import Settings from "./components/Settings";
 import MarketplacePanel from "./components/MarketplacePanel";
 import ScheduledTasksPanel from "./components/ScheduledTasksPanel";
 import FileExplorer from "./components/RightPanel";
+import { openExternal } from "./openExternal";
 import { useChat } from "./hooks/useChat";
 import { useScheduledTasks } from "./hooks/useScheduledTasks";
 import type { ModelConfig, PreviewRequest, PreviewTarget, SkillEntry, TaskRunRecord } from "./types";
@@ -203,13 +204,16 @@ export default function App() {
 
   // Open a file path or URL in the right-side preview panel (clicked in a chat
   // message). The nonce lets the same target be re-opened.
+  // Open a file path or URL from a chat message. URLs are delegated to the
+  // system default browser (Pixie no longer embeds a browser); file paths open
+  // in the right-side preview panel. The nonce lets the same file be re-opened.
   const handleOpenPreview = useCallback((t: PreviewRequest) => {
+    if (t.kind === "url") {
+      void openExternal(t.url);
+      return;
+    }
     const nonce = Date.now();
-    setPreviewTarget(
-      t.kind === "file"
-        ? { kind: "file", path: t.path, nonce }
-        : { kind: "url", url: t.url, nonce }
-    );
+    setPreviewTarget({ kind: "file", path: t.path, nonce });
     setFileExplorerOpen(true);
   }, []);
 

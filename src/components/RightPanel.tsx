@@ -13,7 +13,7 @@ interface RightPanelProps {
   previewTarget: PreviewTarget | null;
 }
 
-type Tab = "files" | "preview" | "git" | "browser" | "terminal";
+type Tab = "files" | "preview" | "git" | "terminal";
 
 const CODE_EXTENSIONS = new Set([
   "js", "jsx", "ts", "tsx", "rs", "py", "go", "java", "c", "cpp", "h", "hpp",
@@ -57,10 +57,6 @@ export default function RightPanel({ workspacePath, previewTarget }: RightPanelP
   const [gitLoading, setGitLoading] = useState(false);
   const [selectedCommit, setSelectedCommit] = useState<string | null>(null);
   const [gitDiff, setGitDiff] = useState("");
-
-  // Browser state
-  const [browserUrl, setBrowserUrl] = useState("http://localhost:5173");
-  const [iframeUrl, setIframeUrl] = useState("http://localhost:5173");
 
   // Workspaces whose terminal has been opened at least once. Each gets a
   // permanently-mounted Terminal (its own PTY) so scrollback and any running
@@ -122,24 +118,15 @@ export default function RightPanel({ workspacePath, previewTarget }: RightPanelP
     } finally { setPreviewLoading(false); }
   }, []);
 
-  const openUrl = useCallback((url: string) => {
-    setBrowserUrl(url);
-    setIframeUrl(url);
-    setTab("browser");
-  }, []);
-
-  // React to an externally-requested preview target (a file path or URL clicked
-  // in a chat message). Keyed on `previewTarget` (which carries a nonce) so the
-  // same target can be re-opened.
+  // React to an externally-requested file preview target (a file path clicked
+  // in a chat message). URLs never reach here — they are handed off to the
+  // system browser instead. Keyed on `previewTarget` (which carries a nonce)
+  // so the same target can be re-opened.
   useEffect(() => {
-    if (!previewTarget) return;
-    if (previewTarget.kind === "file") {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- legitimate: drive panel state from an external prop
-      openPreview({ name: basename(previewTarget.path), path: previewTarget.path, is_dir: false, size: 0 });
-    } else {
-      openUrl(previewTarget.url);
-    }
-  }, [previewTarget, openPreview, openUrl]);
+    if (!previewTarget || previewTarget.kind !== "file") return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- legitimate: drive panel state from an external prop
+    openPreview({ name: basename(previewTarget.path), path: previewTarget.path, is_dir: false, size: 0 });
+  }, [previewTarget, openPreview]);
 
   // The panel no longer remounts on workspace switch (so per-workspace terminals
   // persist), so reset the workspace-scoped views when the workspace changes.
@@ -222,7 +209,6 @@ export default function RightPanel({ workspacePath, previewTarget }: RightPanelP
                 ["files", "📁", "Files"],
                 ["preview", "📄", "Preview"],
                 ["git", "🔀", "Git"],
-                ["browser", "🌐", "Browser"],
                 ["terminal", "⬛", "Terminal"],
               ] as [Tab, string, string][]).map(([t, icon, name]) => (
                 <button
@@ -243,7 +229,7 @@ export default function RightPanel({ workspacePath, previewTarget }: RightPanelP
         </div>
 
         {/* Tab content area. `relative` lets the persistent terminal layer overlay
-            it without disturbing the files/preview/git/browser layouts. */}
+            it without disturbing the files/preview/git layouts. */}
         <div className="flex-1 flex flex-col relative min-h-0">
 
         {/* === FILES TAB === */}
@@ -445,34 +431,6 @@ export default function RightPanel({ workspacePath, previewTarget }: RightPanelP
                 )}
               </>
             )}
-          </div>
-        )}
-
-        {/* === BROWSER TAB === */}
-        {tab === "browser" && (
-          <div className="flex-1 flex flex-col min-h-0">
-            <div className="flex items-center gap-2 px-3 py-2 border-b border-[var(--border-color)] shrink-0">
-              <input
-                type="text"
-                value={browserUrl}
-                onChange={(e) => setBrowserUrl(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && setIframeUrl(browserUrl)}
-                placeholder="Enter URL..."
-                className="flex-1 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg px-3 py-1.5 text-xs text-[var(--text-primary)] placeholder-[var(--text-secondary)] outline-none focus:border-[var(--accent)] transition-colors font-mono"
-              />
-              <button
-                onClick={() => setIframeUrl(browserUrl)}
-                className="px-3 py-1.5 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-xs font-medium transition-colors shrink-0"
-              >
-                Go
-              </button>
-            </div>
-            <iframe
-              src={iframeUrl}
-              className="flex-1 border-0 bg-white"
-              title="Browser"
-              sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-            />
           </div>
         )}
 

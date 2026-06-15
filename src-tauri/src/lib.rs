@@ -453,6 +453,37 @@ async fn run_command(command: String, cwd: String) -> Result<String, String> {
     Ok(format!("{}{}", stdout, stderr))
 }
 
+/// Open a URL (or other external target) in the user's system default
+/// application via the platform's native opener. The in-app browser was
+/// removed, so every external link is delegated to the OS instead.
+#[tauri::command]
+fn open_external(target: String) -> Result<(), String> {
+    // Only let through URL schemes; block anything that looks like a path or
+    // a dangerous scheme such as `file://` or `javascript:`.
+    let lower = target.to_ascii_lowercase();
+    let ok = lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("mailto:")
+        || lower.starts_with("tel:");
+    if !ok {
+        return Err(format!("Refusing to open non-URL target: {}", target));
+    }
+
+    let (program, args): (&str, Vec<&str>) = if cfg!(target_os = "macos") {
+        ("open", vec![&target])
+    } else if cfg!(target_os = "windows") {
+        ("cmd", vec!["/C", "start", "", &target])
+    } else {
+        ("xdg-open", vec![&target])
+    };
+
+    std::process::Command::new(program)
+        .args(&args)
+        .spawn()
+        .map_err(|e| format!("Failed to open '{}': {}", target, e))?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn pty_spawn(
     id: String,
@@ -1667,6 +1698,7 @@ pub fn run() {
             set_model_config,
             list_directory,
             read_file_content,
+            open_external,
             list_skills,
             plugin_marketplace_list,
             plugin_available,
