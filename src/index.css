@@ -138,7 +138,10 @@ body {
 
 .markdown-body {
   line-height: 1.6;
-  word-wrap: break-word;
+  /* Wrap long unbreakable runs (URLs, identifiers) instead of letting them blow
+     out the message bubble's width. `anywhere` only breaks when actually needed. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .markdown-body p {
@@ -200,6 +203,10 @@ body {
   border-collapse: collapse;
   margin: 0.5em 0;
   width: 100%;
+  /* Wide tables scroll horizontally inside the bubble instead of overflowing. */
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
 }
 
 .markdown-body th,
@@ -255,6 +262,13 @@ body {
 .code-block-wrapper pre {
   margin: 0 !important;
   border-radius: 0 0 8px 8px !important;
+}
+
+/* Any fenced block (incl. language-less ones react-markdown renders as a plain
+   <pre>) scrolls horizontally rather than overflowing the message bubble. */
+.markdown-body pre {
+  overflow-x: auto;
+  max-width: 100%;
 }
 
 .copy-code-btn {

@@ -77,9 +77,10 @@ export default function App() {
     }
   });
   const [skills, setSkills] = useState<SkillEntry[]>([]);
-  // Composer draft lives here so InputBar stays controlled; `composerRef` lets
-  // the ✨ skill picker refocus the input after inserting an invocation.
-  const [draft, setDraft] = useState("");
+  // Composer drafts are kept per conversation (keyed by conversation id, derived
+  // below once activeId is known) so each session binds its own input and
+  // switching between them never clears what you've typed.
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
   const composerRef = useRef<HTMLTextAreaElement>(null);
 
   const {
@@ -106,6 +107,16 @@ export default function App() {
     addScheduledRun,
     addRunningTask,
   } = useChat(modelConfig);
+
+  // Per-conversation composer draft. Keyed by the active conversation id so each
+  // session keeps its own input; a workspace-level scratch key covers the brief
+  // window before any conversation exists (e.g. a brand-new workspace).
+  const draftKey = activeId ?? `ws:${activeWorkspaceId ?? ""}`;
+  const draft = drafts[draftKey] ?? "";
+  const handleDraftChange = useCallback(
+    (value: string) => setDrafts((prev) => ({ ...prev, [draftKey]: value })),
+    [draftKey]
+  );
 
   const {
     tasks: scheduledTasks,
@@ -295,9 +306,9 @@ export default function App() {
               onStop={() => stopGeneration()}
               isGenerating={isGenerating}
               disabled={!activeWorkspace}
-              disabledHint="Add a workspace to start chatting"
+              disabledHint="Add a workspace to send"
               value={draft}
-              onChange={setDraft}
+              onChange={handleDraftChange}
               textareaRef={composerRef}
               skills={skills}
               workspacePath={activeWorkspace?.path ?? null}
@@ -357,12 +368,19 @@ export default function App() {
         )}
       </div>
 
-      {fileExplorerOpen && activeWorkspace?.path && (
-        <FileExplorer
-          workspacePath={activeWorkspace.path}
-          previewTarget={previewTarget}
-          onClose={() => setFileExplorerOpen(false)}
-        />
+      {/* The right panel stays mounted while a workspace is active and is just
+          hidden via `display` when closed, so its state (open tab, file path,
+          preview, browser URL, terminal session, width) survives close/reopen.
+          Keying by workspace path resets it cleanly when switching workspaces. */}
+      {activeWorkspace?.path && (
+        <div className="h-full" style={{ display: fileExplorerOpen ? "block" : "none" }}>
+          <FileExplorer
+            key={activeWorkspace.path}
+            workspacePath={activeWorkspace.path}
+            previewTarget={previewTarget}
+            onClose={() => setFileExplorerOpen(false)}
+          />
+        </div>
       )}
     </div>
   );
