@@ -188,10 +188,6 @@ export default function App() {
         e.preventDefault();
         stopGeneration();
       }
-      if ((e.ctrlKey || e.metaKey) && e.key === "b") {
-        e.preventDefault();
-        setSidebarOpen((prev) => !prev);
-      }
       if ((e.ctrlKey || e.metaKey) && e.key === ",") {
         e.preventDefault();
         setMainView((prev) => (prev === "settings" ? "chat" : "settings"));
@@ -259,10 +255,27 @@ export default function App() {
             {/* Header */}
             <header className="shrink-0 flex items-center justify-between px-4 py-3 border-b border-[var(--border-color)] bg-[var(--bg-primary)]">
               <div className="flex items-center gap-3">
+                {/* When the sidebar is collapsed, surface a new-session button at the
+                    top-left so users can stay in immersive mode without reopening it. */}
+                {!sidebarOpen && (
+                  <button
+                    onClick={() => {
+                      setMainView("chat");
+                      createConversation();
+                    }}
+                    disabled={!activeWorkspace}
+                    className="p-1.5 rounded-lg hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                    title="New session (Ctrl+N)"
+                  >
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                      <path d="M10 4v12M4 10h12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                    </svg>
+                  </button>
+                )}
                 <button
                   onClick={() => setSidebarOpen((prev) => !prev)}
                   className="p-1.5 rounded-lg hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)] transition-colors"
-                  title="Toggle sidebar (Ctrl+B)"
+                  title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
                 >
                   <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
                     <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
