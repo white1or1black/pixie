@@ -85,7 +85,7 @@ export default function App() {
   const composerRef = useRef<HTMLTextAreaElement>(null);
 
   const {
-    conversations,
+    unifiedConversations,
     activeConversation,
     activeId,
     isGenerating,
@@ -94,10 +94,11 @@ export default function App() {
     workspaces,
     activeWorkspace,
     activeWorkspaceId,
+    workspaceFilter,
+    setWorkspaceFilter,
     error,
     addWorkspace,
     removeWorkspace,
-    switchWorkspace,
     createConversation,
     switchConversation,
     deleteConversation,
@@ -229,23 +230,23 @@ export default function App() {
   return (
     <div className="flex h-screen overflow-hidden bg-[var(--bg-primary)] text-[var(--text-primary)]">
       <Sidebar
-        conversations={conversations}
+        entries={unifiedConversations}
         workspaces={workspaces}
-        activeWorkspaceId={activeWorkspaceId}
+        workspaceFilter={workspaceFilter}
         activeId={activeId}
         generatingIds={generatingIds}
-        onSelect={(id) => {
+        onSelect={(id, workspaceId) => {
           setMainView("chat");
-          switchConversation(id);
+          switchConversation(id, workspaceId);
         }}
-        onNew={() => {
+        onNew={(workspaceId) => {
           setMainView("chat");
-          createConversation();
+          createConversation(workspaceId);
         }}
         onDelete={deleteConversation}
         onAddWorkspace={addWorkspace}
         onRemoveWorkspace={removeWorkspace}
-        onSwitchWorkspace={switchWorkspace}
+        onSetWorkspaceFilter={setWorkspaceFilter}
         onOpenSettings={() => setMainView("settings")}
         onOpenTasks={() => setMainView("tasks")}
         onOpenSkills={() => setMainView("skills")}
@@ -285,9 +286,16 @@ export default function App() {
                     <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
                   </svg>
                 </button>
-                <h1 className="text-sm font-semibold text-[var(--text-primary)] truncate">
-                  {activeConversation?.title ?? "Pixie"}
-                </h1>
+                <div className="min-w-0">
+                  <h1 className="text-sm font-semibold text-[var(--text-primary)] truncate">
+                    {activeConversation?.title ?? "Pixie"}
+                  </h1>
+                  {activeWorkspace && (
+                    <p className="text-[10px] text-[var(--text-secondary)] truncate" title={activeWorkspace.path}>
+                      📁 {activeWorkspace.name}
+                    </p>
+                  )}
+                </div>
               </div>
               <div className="flex items-center gap-2">
                 <button
