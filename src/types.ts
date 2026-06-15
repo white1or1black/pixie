@@ -39,14 +39,28 @@ export interface Conversation {
   messages: Message[];
   createdAt: number;
   updatedAt: number;
+  /** Agent engine bound to this session. Defaults to claude for legacy data. */
+  engine: AgentEngineId;
 }
 
-export interface ClaudeStatus {
+export type AgentEngineId = "claude" | "cursor";
+
+export const AGENT_ENGINES: { id: AgentEngineId; label: string }[] = [
+  { id: "claude", label: "Claude Code" },
+  { id: "cursor", label: "Cursor Agent" },
+];
+
+export interface EngineStatus {
+  id: AgentEngineId;
+  display_name: string;
   available: boolean;
   version?: string;
   path?: string;
   error?: string;
 }
+
+/** @deprecated Use EngineStatus — kept for gradual migration */
+export type ClaudeStatus = Pick<EngineStatus, "available" | "version" | "path" | "error">;
 
 export interface ResponseChunk {
   conversation_id: string;
@@ -109,7 +123,7 @@ export interface WorkspaceState {
   name: string;
 }
 
-export interface ModelConfig {
+export interface ClaudeModelConfig {
   ANTHROPIC_API_KEY?: string;
   ANTHROPIC_BASE_URL?: string;
   ANTHROPIC_MODEL?: string;
@@ -119,6 +133,46 @@ export interface ModelConfig {
   CLAUDE_CODE_SUBAGENT_MODEL?: string;
   CLAUDE_CODE_EFFORT_LEVEL?: string;
 }
+
+export interface CursorModelConfig {
+  CURSOR_API_KEY?: string;
+  /** Passed to cursor-agent as --model when set */
+  CURSOR_MODEL?: string;
+}
+
+/** Per-engine model/env overrides. */
+export type EngineModelConfigs = {
+  claude: ClaudeModelConfig;
+  cursor: CursorModelConfig;
+};
+
+/** @deprecated Use EngineModelConfigs */
+export type ModelConfig = ClaudeModelConfig;
+
+export const DEFAULT_ENGINE_MODEL_CONFIGS: EngineModelConfigs = {
+  claude: {},
+  cursor: {},
+};
+
+export const ENGINE_MODEL_FIELDS: Record<
+  AgentEngineId,
+  { key: string; label: string; secret?: boolean }[]
+> = {
+  claude: [
+    { key: "ANTHROPIC_API_KEY", label: "API Key", secret: true },
+    { key: "ANTHROPIC_BASE_URL", label: "Base URL" },
+    { key: "ANTHROPIC_MODEL", label: "Default Model" },
+    { key: "ANTHROPIC_DEFAULT_OPUS_MODEL", label: "Opus Model" },
+    { key: "ANTHROPIC_DEFAULT_SONNET_MODEL", label: "Sonnet Model" },
+    { key: "ANTHROPIC_DEFAULT_HAIKU_MODEL", label: "Haiku Model" },
+    { key: "CLAUDE_CODE_SUBAGENT_MODEL", label: "Subagent Model" },
+    { key: "CLAUDE_CODE_EFFORT_LEVEL", label: "Effort Level" },
+  ],
+  cursor: [
+    { key: "CURSOR_API_KEY", label: "API Key", secret: true },
+    { key: "CURSOR_MODEL", label: "Model" },
+  ],
+};
 
 export interface FileEntry {
   name: string;

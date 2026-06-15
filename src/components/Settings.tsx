@@ -1,35 +1,47 @@
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import type { ClaudeStatus, ModelConfig } from "../types";
+import type { EngineStatus, AgentEngineId, EngineModelConfigs } from "../types";
+import { AGENT_ENGINES, ENGINE_MODEL_FIELDS } from "../types";
 import { useUpdater } from "../hooks/useUpdater";
 
 // Brand mark — same art as the app/README icon.
 const iconUrl = new URL("../assets/icon.svg", import.meta.url).href;
 
 interface SettingsProps {
-  claudeStatus: ClaudeStatus | null;
+  engineStatuses: EngineStatus[] | null;
   onRefreshStatus: () => void;
+  defaultEngine: AgentEngineId;
+  onDefaultEngineChange: (engine: AgentEngineId) => void;
   theme: "dark" | "light";
   onThemeChange: (theme: "dark" | "light") => void;
   onClose: () => void;
   systemPrompt: string;
   onSystemPromptChange: (prompt: string) => void;
-  modelConfig: ModelConfig;
-  onModelConfigChange: (config: ModelConfig) => void;
+  engineModelConfigs: EngineModelConfigs;
+  onEngineModelConfigChange: (
+    engine: AgentEngineId,
+    patch: Record<string, string | undefined>,
+  ) => void;
 }
 
 export default function Settings({
-  claudeStatus,
+  engineStatuses,
   onRefreshStatus,
+  defaultEngine,
+  onDefaultEngineChange,
   theme,
   onThemeChange,
   onClose,
   systemPrompt,
   onSystemPromptChange,
-  modelConfig,
-  onModelConfigChange,
+  engineModelConfigs,
+  onEngineModelConfigChange,
 }: SettingsProps) {
   const [_checking, setChecking] = useState(false);
+  const [expandedEngines, setExpandedEngines] = useState<Record<AgentEngineId, boolean>>({
+    claude: false,
+    cursor: false,
+  });
   const updater = useUpdater();
   const [appVersion, setAppVersion] = useState("");
 
@@ -66,51 +78,75 @@ export default function Settings({
         </div>
 
         <div className="flex-1 overflow-y-auto p-5 space-y-6">
-          {/* Claude CLI Status */}
+          {/* Agent engines */}
           <section>
             <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">
-              Claude CLI
+              Agent Engines
             </h3>
-            <div className="bg-[var(--bg-primary)] rounded-xl p-4 border border-[var(--border-color)]">
-              {claudeStatus ? (
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2">
-                    <div
-                      className={`w-2.5 h-2.5 rounded-full ${
-                        claudeStatus.available ? "bg-green-400" : "bg-red-400"
-                      }`}
-                    />
-                    <span className="text-sm text-[var(--text-primary)]">
-                      {claudeStatus.available ? "Available" : "Not Found"}
-                    </span>
+            <div className="space-y-3">
+              {engineStatuses ? (
+                engineStatuses.map((status) => (
+                  <div
+                    key={status.id}
+                    className="bg-[var(--bg-primary)] rounded-xl p-4 border border-[var(--border-color)]"
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      <div
+                        className={`w-2.5 h-2.5 rounded-full ${
+                          status.available ? "bg-green-400" : "bg-red-400"
+                        }`}
+                      />
+                      <span className="text-sm font-medium text-[var(--text-primary)]">
+                        {status.display_name}
+                      </span>
+                    </div>
+                    {status.version && (
+                      <p className="text-xs text-[var(--text-secondary)]">
+                        Version: {status.version}
+                      </p>
+                    )}
+                    {status.path && (
+                      <p className="text-xs text-[var(--text-secondary)] break-all">
+                        Path: {status.path}
+                      </p>
+                    )}
+                    {status.error && (
+                      <p className="text-xs text-red-400">{status.error}</p>
+                    )}
                   </div>
-                  {claudeStatus.version && (
-                    <p className="text-xs text-[var(--text-secondary)]">
-                      Version: {claudeStatus.version}
-                    </p>
-                  )}
-                  {claudeStatus.path && (
-                    <p className="text-xs text-[var(--text-secondary)] break-all">
-                      Path: {claudeStatus.path}
-                    </p>
-                  )}
-                  {claudeStatus.error && (
-                    <p className="text-xs text-red-400">{claudeStatus.error}</p>
-                  )}
-                </div>
+                ))
               ) : (
-                <p className="text-sm text-[var(--text-secondary)]">
-                  Checking...
-                </p>
+                <p className="text-sm text-[var(--text-secondary)]">Checking...</p>
               )}
               <button
                 onClick={handleRefresh}
                 disabled={_checking}
-                className="mt-3 px-3 py-1.5 rounded-lg bg-[var(--bg-tertiary)] hover:bg-[var(--accent)]/20 text-xs text-[var(--text-primary)] transition-colors disabled:opacity-50"
+                className="px-3 py-1.5 rounded-lg bg-[var(--bg-tertiary)] hover:bg-[var(--accent)]/20 text-xs text-[var(--text-primary)] transition-colors disabled:opacity-50"
               >
                 {_checking ? "Checking..." : "Refresh"}
               </button>
             </div>
+          </section>
+
+          {/* Default engine for new sessions */}
+          <section>
+            <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">
+              Default Engine
+            </h3>
+            <select
+              value={defaultEngine}
+              onChange={(e) => onDefaultEngineChange(e.target.value as AgentEngineId)}
+              className="w-full text-sm rounded-xl px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-color)] text-[var(--text-primary)]"
+            >
+              {AGENT_ENGINES.map((e) => (
+                <option key={e.id} value={e.id}>
+                  {e.label}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-[var(--text-secondary)] mt-2">
+              New sessions use this engine. Existing sessions keep their bound engine.
+            </p>
           </section>
 
           {/* Theme */}
@@ -142,41 +178,91 @@ export default function Settings({
             </div>
           </section>
 
-          {/* Model Configuration */}
+          {/* Model Configuration (per engine, collapsed by default) */}
           <section>
-            <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">
+            <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-2">
               Model Configuration
             </h3>
             <p className="text-xs text-[var(--text-secondary)] mb-3">
-              Set environment variables to override the default Claude model.
-              Leave empty to use system defaults.
+              Environment overrides per engine. Leave empty to use system defaults.
             </p>
-            <div className="space-y-3">
-              {([
-                { key: "ANTHROPIC_API_KEY", label: "API Key" },
-                { key: "ANTHROPIC_BASE_URL", label: "Base URL" },
-                { key: "ANTHROPIC_MODEL", label: "Default Model" },
-                { key: "ANTHROPIC_DEFAULT_OPUS_MODEL", label: "Opus Model" },
-                { key: "ANTHROPIC_DEFAULT_SONNET_MODEL", label: "Sonnet Model" },
-                { key: "ANTHROPIC_DEFAULT_HAIKU_MODEL", label: "Haiku Model" },
-                { key: "CLAUDE_CODE_SUBAGENT_MODEL", label: "Subagent Model" },
-                { key: "CLAUDE_CODE_EFFORT_LEVEL", label: "Effort Level" },
-              ] as { key: keyof ModelConfig; label: string }[]).map(({ key, label }) => (
-                <div key={key}>
-                  <label className="block text-xs text-[var(--text-secondary)] mb-1">
-                    {label} <code className="text-[10px] opacity-60">{key}</code>
-                  </label>
-                  <input
-                    type={key === "ANTHROPIC_API_KEY" ? "password" : "text"}
-                    value={modelConfig[key] ?? ""}
-                    onChange={(e) =>
-                      onModelConfigChange({ ...modelConfig, [key]: e.target.value || undefined })
-                    }
-                    placeholder={`$` + key}
-                    className="w-full bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] placeholder-[var(--text-secondary)] outline-none focus:border-[var(--accent)] transition-colors font-mono"
-                  />
-                </div>
-              ))}
+            <div className="space-y-2">
+              {AGENT_ENGINES.map(({ id, label }) => {
+                const expanded = expandedEngines[id];
+                const fields = ENGINE_MODEL_FIELDS[id];
+                const config = engineModelConfigs[id] as Record<string, string | undefined>;
+                const filledCount = fields.filter((f) => config[f.key]?.trim()).length;
+
+                return (
+                  <div
+                    key={id}
+                    className="bg-[var(--bg-primary)] rounded-xl border border-[var(--border-color)] overflow-hidden"
+                  >
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setExpandedEngines((prev) => ({ ...prev, [id]: !prev[id] }))
+                      }
+                      className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-[var(--bg-tertiary)]/40 transition-colors"
+                    >
+                      <div className="min-w-0">
+                        <span className="text-sm font-medium text-[var(--text-primary)]">
+                          {label}
+                        </span>
+                        {!expanded && filledCount > 0 && (
+                          <span className="ml-2 text-[10px] text-[var(--text-secondary)]">
+                            {filledCount} override{filledCount === 1 ? "" : "s"}
+                          </span>
+                        )}
+                      </div>
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 14 14"
+                        fill="none"
+                        className={`shrink-0 text-[var(--text-secondary)] transition-transform ${
+                          expanded ? "rotate-180" : ""
+                        }`}
+                      >
+                        <path
+                          d="M3 5l4 4 4-4"
+                          stroke="currentColor"
+                          strokeWidth="1.5"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </button>
+
+                    {expanded && (
+                      <div className="px-4 pb-4 space-y-3 border-t border-[var(--border-color)]">
+                        <p className="text-[10px] text-[var(--text-secondary)] pt-3">
+                          Applies only to {label} sessions.
+                        </p>
+                        {fields.map(({ key, label: fieldLabel, secret }) => (
+                          <div key={key}>
+                            <label className="block text-xs text-[var(--text-secondary)] mb-1">
+                              {fieldLabel}{" "}
+                              <code className="text-[10px] opacity-60">{key}</code>
+                            </label>
+                            <input
+                              type={secret ? "password" : "text"}
+                              value={config[key] ?? ""}
+                              onChange={(e) =>
+                                onEngineModelConfigChange(id, {
+                                  [key]: e.target.value || undefined,
+                                })
+                              }
+                              placeholder={`$${key}`}
+                              className="w-full bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] placeholder-[var(--text-secondary)] outline-none focus:border-[var(--accent)] transition-colors font-mono"
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </section>
 
@@ -188,7 +274,7 @@ export default function Settings({
             <textarea
               value={systemPrompt}
               onChange={(e) => onSystemPromptChange(e.target.value)}
-              placeholder="Enter a system prompt for Claude..."
+              placeholder="Enter a system prompt for the agent..."
               rows={4}
               className="w-full bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-xl px-4 py-3 text-sm text-[var(--text-primary)] placeholder-[var(--text-secondary)] resize-none outline-none focus:border-[var(--accent)] transition-colors"
             />

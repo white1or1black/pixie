@@ -4,7 +4,8 @@ import { listen } from "@tauri-apps/api/event";
 import type {
   Conversation,
   Message,
-  ClaudeStatus,
+  EngineStatus,
+  AgentEngineId,
   ResponseChunk,
   ResponseDone,
   ResponseError,
@@ -15,11 +16,20 @@ import type {
   MessageUsage,
   ToolStep,
   WorkspaceState,
-  ModelConfig,
+  EngineModelConfigs,
   TaskRunRecord,
 } from "../types";
+import { AGENT_ENGINES } from "../types";
 
 const DATA_KEY = "pixie-data";
+const DEFAULT_ENGINE_KEY = "pixie-default-engine";
+
+function normalizeConversation(conv: Conversation): Conversation {
+  return {
+    ...conv,
+    engine: conv.engine ?? "claude",
+  };
+}
 
 interface AppData {
   workspaces: WorkspaceState[];
@@ -120,7 +130,7 @@ function sortWorkspacesByActivity(
   });
 }
 
-export function useChat(modelConfig: ModelConfig) {
+export function useChat(engineModelConfigs: EngineModelConfigs) {
   const [workspaces, setWorkspaces] = useState<WorkspaceState[]>([]);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
   const [allConversations, setAllConversations] = useState<Record<string, Conversation[]>>({});
@@ -128,7 +138,11 @@ export function useChat(modelConfig: ModelConfig) {
   /** null = show all workspaces in the sidebar */
   const [workspaceFilter, setWorkspaceFilter] = useState<string | null>(null);
   const [generatingIds, setGeneratingIds] = useState<Set<string>>(new Set());
-  const [claudeStatus, setClaudeStatus] = useState<ClaudeStatus | null>(null);
+  const [engineStatuses, setEngineStatuses] = useState<EngineStatus[] | null>(null);
+  const [defaultEngine, setDefaultEngine] = useState<AgentEngineId>(() => {
+    const stored = localStorage.getItem(DEFAULT_ENGINE_KEY);
+    return stored === "cursor" ? "cursor" : "claude";
+  });
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
 
@@ -166,14 +180,17 @@ export function useChat(modelConfig: ModelConfig) {
 
   const isGenerating = activeId ? generatingIds.has(activeId) : false;
 
-  // Sync model config to Rust backend
+  // Sync per-engine model config to Rust backend
   useEffect(() => {
-    const config: Record<string, string> = {};
-    for (const [k, v] of Object.entries(modelConfig)) {
-      if (v) config[k] = v;
+    for (const { id } of AGENT_ENGINES) {
+      const cfg = engineModelConfigs[id];
+      const config: Record<string, string> = {};
+      for (const [k, v] of Object.entries(cfg)) {
+        if (v) config[k] = v;
+      }
+      invoke("set_engine_model_config", { engine: id, config }).catch(() => {});
     }
-    invoke("set_model_config", { config }).catch(() => {});
-  }, [modelConfig]);
+  }, [engineModelConfigs]);
 
   // Load data
   useEffect(() => {
@@ -188,7 +205,7 @@ export function useChat(modelConfig: ModelConfig) {
       workspaces.push({ ...w, id: w.path });
       const byOld = raw.conversations[w.id] ?? [];
       const byPath = raw.conversations[w.path] ?? [];
-      conversations[w.path] = byPath.length >= byOld.length ? byPath : byOld;
+      conversations[w.path] = (byPath.length >= byOld.length ? byPath : byOld).map(normalizeConversation);
     }
     const legacyActivePath = raw.workspaces.find((w) => w.id === raw.activeWorkspaceId)?.path;
     const activeWorkspaceId =
@@ -226,19 +243,26 @@ export function useChat(modelConfig: ModelConfig) {
   }, [activeWorkspace?.path]);
 
   useEffect(() => {
-    invoke<ClaudeStatus>("check_claude_available")
-      .then((status) => setClaudeStatus(status))
+    invoke<EngineStatus[]>("check_engines_available")
+      .then((statuses) => setEngineStatuses(statuses))
       .catch(() =>
-        setClaudeStatus({ available: false, error: "Failed to check Claude availability" })
+        setEngineStatuses([
+          { id: "claude", display_name: "Claude Code", available: false, error: "Failed to check engines" },
+          { id: "cursor", display_name: "Cursor Agent", available: false, error: "Failed to check engines" },
+        ])
       );
   }, []);
+
+  useEffect(() => {
+    localStorage.setItem(DEFAULT_ENGINE_KEY, defaultEngine);
+  }, [defaultEngine]);
 
   // Listen to Tauri events — route updates by conversation_id, not active workspace.
   useEffect(() => {
     let mounted = true;
 
     async function setup() {
-      const u1 = await listen<ResponseChunk>("claude-response", (event) => {
+      const u1 = await listen<ResponseChunk>("agent-response", (event) => {
         const { conversation_id, content } = event.payload;
         setAllConversations((prev) =>
           patchConversation(prev, conversation_id, (conv) => {
@@ -252,7 +276,7 @@ export function useChat(modelConfig: ModelConfig) {
         );
       });
 
-      const u2 = await listen<ResponseDone>("claude-done", (event) => {
+      const u2 = await listen<ResponseDone>("agent-done", (event) => {
         const done = event.payload;
         setAllConversations((prev) =>
           patchConversation(prev, done.conversation_id, (conv) => {
@@ -272,7 +296,7 @@ export function useChat(modelConfig: ModelConfig) {
         setError(null);
       });
 
-      const u3 = await listen<ResponseError>("claude-error", (event) => {
+      const u3 = await listen<ResponseError>("agent-error", (event) => {
         const err = event.payload;
         setError(err.error);
         setAllConversations((prev) =>
@@ -292,7 +316,7 @@ export function useChat(modelConfig: ModelConfig) {
         });
       });
 
-      const u4 = await listen<ResponseTool>("claude-tool", (event) => {
+      const u4 = await listen<ResponseTool>("agent-tool", (event) => {
         const tool = event.payload;
         setAllConversations((prev) =>
           patchConversation(prev, tool.conversation_id, (conv) => {
@@ -338,7 +362,7 @@ export function useChat(modelConfig: ModelConfig) {
         );
       });
 
-      const u5 = await listen<ResponseThinking>("claude-thinking", (event) => {
+      const u5 = await listen<ResponseThinking>("agent-thinking", (event) => {
         const { conversation_id, tokens } = event.payload;
         setAllConversations((prev) =>
           patchConversation(prev, conversation_id, (conv) => {
@@ -351,7 +375,7 @@ export function useChat(modelConfig: ModelConfig) {
         );
       });
 
-      const u6 = await listen<ResponseUsage>("claude-usage", (event) => {
+      const u6 = await listen<ResponseUsage>("agent-usage", (event) => {
         const u = event.payload;
         setAllConversations((prev) =>
           patchConversation(prev, u.conversation_id, (conv) => {
@@ -394,7 +418,7 @@ export function useChat(modelConfig: ModelConfig) {
         );
       });
 
-      const u7 = await listen<ResponseThinkingText>("claude-thinking-text", (event) => {
+      const u7 = await listen<ResponseThinkingText>("agent-thinking-text", (event) => {
         const { conversation_id, content } = event.payload;
         setAllConversations((prev) =>
           patchConversation(prev, conversation_id, (conv) => {
@@ -464,13 +488,14 @@ export function useChat(modelConfig: ModelConfig) {
     }
   }, [activeWorkspaceId, activeId, workspaceFilter, workspaces]);
 
-  const createConversation = useCallback((workspaceId?: string) => {
+  const createConversation = useCallback((workspaceId?: string, engine?: AgentEngineId) => {
     const wsId = workspaceId ?? resolveTargetWorkspace();
     if (!wsId) return "";
     const id = generateId();
     const conv: Conversation = {
       id, title: "New Agent", messages: [],
       createdAt: Date.now(), updatedAt: Date.now(),
+      engine: engine ?? defaultEngine,
     };
     setAllConversations((prev) => ({
       ...prev,
@@ -480,7 +505,7 @@ export function useChat(modelConfig: ModelConfig) {
     setActiveId(id);
     setError(null);
     return id;
-  }, [resolveTargetWorkspace]);
+  }, [resolveTargetWorkspace, defaultEngine]);
 
   const switchConversation = useCallback((id: string, workspaceId?: string) => {
     const wsId =
@@ -521,6 +546,7 @@ export function useChat(modelConfig: ModelConfig) {
         const conv: Conversation = {
           id: convId, title: generateTitle(content), messages: [],
           createdAt: Date.now(), updatedAt: Date.now(),
+          engine: defaultEngine,
         };
         setAllConversations((prev) => ({
           ...prev,
@@ -563,6 +589,7 @@ export function useChat(modelConfig: ModelConfig) {
       setError(null);
 
       const currentConv = allConversationsRef.current[wsId]?.find((c) => c.id === convId);
+      const engine = currentConv?.engine ?? defaultEngine;
       const isContinue = currentConv
         ? currentConv.messages.filter((m) => m.role === "user").length > 0
         : false;
@@ -574,6 +601,7 @@ export function useChat(modelConfig: ModelConfig) {
         await invoke("send_message", {
           message: content,
           conversationId: convId,
+          engine,
           isContinue,
         });
       } catch (e) {
@@ -595,7 +623,7 @@ export function useChat(modelConfig: ModelConfig) {
         );
       }
     },
-    [activeId, resolveTargetWorkspace],
+    [activeId, resolveTargetWorkspace, defaultEngine],
   );
 
   const stopGeneration = useCallback(async (convId?: string) => {
@@ -631,6 +659,7 @@ export function useChat(modelConfig: ModelConfig) {
       title: run.task_name || generateTitle(run.prompt),
       createdAt: startedMs,
       updatedAt: finishedMs,
+      engine: "claude",
       messages: [
         { id: generateId(), role: "user", content: run.prompt, timestamp: startedMs },
         {
@@ -665,6 +694,7 @@ export function useChat(modelConfig: ModelConfig) {
         title: opts.taskName || generateTitle(opts.prompt),
         createdAt: now,
         updatedAt: now,
+        engine: "claude",
         messages: [
           { id: generateId(), role: "user", content: opts.prompt, timestamp: now, status: "done" },
           { id: generateId(), role: "assistant", content: "Running…", timestamp: now, status: "streaming" },
@@ -683,14 +713,16 @@ export function useChat(modelConfig: ModelConfig) {
     [],
   );
 
-  const refreshClaudeStatus = useCallback(async () => {
+  const refreshEngineStatuses = useCallback(async () => {
     try {
-      const status = await invoke<ClaudeStatus>("check_claude_available");
-      setClaudeStatus(status);
+      const statuses = await invoke<EngineStatus[]>("check_engines_available");
+      setEngineStatuses(statuses);
     } catch {
-      setClaudeStatus({ available: false, error: "Failed to check" });
+      setEngineStatuses(null);
     }
   }, []);
+
+  const anyEngineAvailable = (engineStatuses ?? []).some((s) => s.available);
 
   return {
     unifiedConversations,
@@ -698,7 +730,10 @@ export function useChat(modelConfig: ModelConfig) {
     activeId,
     isGenerating,
     generatingIds,
-    claudeStatus,
+    engineStatuses,
+    anyEngineAvailable,
+    defaultEngine,
+    setDefaultEngine,
     workspaces: sortedWorkspaces,
     activeWorkspace,
     activeWorkspaceId,
@@ -712,7 +747,7 @@ export function useChat(modelConfig: ModelConfig) {
     deleteConversation,
     sendMessage,
     stopGeneration,
-    refreshClaudeStatus,
+    refreshEngineStatuses,
     clearError,
     addScheduledRun,
     addRunningTask,

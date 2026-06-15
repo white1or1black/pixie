@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect } from "react";
 import type { ConversationEntry } from "../hooks/useChat";
-import type { WorkspaceState } from "../types";
+import type { WorkspaceState, AgentEngineId, EngineStatus } from "../types";
+import { AGENT_ENGINES } from "../types";
 
 interface SidebarProps {
   entries: ConversationEntry[];
@@ -19,6 +20,9 @@ interface SidebarProps {
   onOpenSkills: () => void;
   isOpen: boolean;
   onClose: () => void;
+  defaultEngine: AgentEngineId;
+  onDefaultEngineChange: (engine: AgentEngineId) => void;
+  engineStatuses: EngineStatus[];
 }
 
 function relativeTime(ts: number): string {
@@ -90,8 +94,10 @@ function ConversationRow({
           )}
           <p className="text-sm truncate leading-tight">{conv.title}</p>
         </div>
-        <p className="text-[10px] mt-0.5 opacity-60 truncate">
+          <p className="text-[10px] mt-0.5 opacity-60 truncate">
           <span className="text-[var(--accent)]/80">{workspaceLabel}</span>
+          <span className="mx-1">·</span>
+          <span>{AGENT_ENGINES.find((e) => e.id === conv.engine)?.label ?? conv.engine}</span>
           <span className="mx-1">·</span>
           {relativeTime(conv.updatedAt)}
         </p>
@@ -201,6 +207,9 @@ export default function Sidebar({
   onOpenSkills,
   isOpen,
   onClose,
+  defaultEngine,
+  onDefaultEngineChange,
+  engineStatuses,
 }: SidebarProps) {
   const [search, setSearch] = useState("");
   const [wsManageOpen, setWsManageOpen] = useState(false);
@@ -439,6 +448,25 @@ export default function Sidebar({
 
         {/* Bottom bar */}
         <div className="px-3 py-2 border-t border-[var(--border-color)] space-y-1.5">
+          <div className="flex items-center gap-2">
+            <label className="text-[10px] text-[var(--text-secondary)] shrink-0">Engine</label>
+            <select
+              value={defaultEngine}
+              onChange={(e) => onDefaultEngineChange(e.target.value as AgentEngineId)}
+              className="flex-1 min-w-0 text-xs rounded-lg px-2 py-1.5 bg-[var(--bg-primary)] border border-[var(--border-color)] text-[var(--text-primary)]"
+              title="Default engine for new sessions"
+            >
+              {AGENT_ENGINES.map((e) => {
+                const status = engineStatuses.find((s) => s.id === e.id);
+                const suffix = status?.available ? "" : " (unavailable)";
+                return (
+                  <option key={e.id} value={e.id}>
+                    {e.label}{suffix}
+                  </option>
+                );
+              })}
+            </select>
+          </div>
           <div className="relative flex gap-1">
             <button
               onClick={() => onNew(newAgentTargetWs ?? undefined)}

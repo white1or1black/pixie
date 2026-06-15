@@ -1,0 +1,595 @@
+use super::{
+    EngineStatus, NormalizedEvent, ToolEvent, ToolEventKind, UsageInfo, shared,
+};
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use tokio::process::{Child, Command};
+
+const CLAUDE_BINARY_NAMES: &[&str] = &["claude"];
+
+const ENV_PREFIXES: &[&str] = &[
+    "ANTHROPIC_",
+    "CLAUDE",
+    "AWS_",
+    "GOOGLE_",
+    "VERTEX_",
+    "OPENAI_",
+    "AZURE_",
+];
+
+async fn collect_env() -> HashMap<String, String> {
+    shared::collect_env("claude", ENV_PREFIXES, shared::ENV_EXACT).await
+}
+
+pub fn find_claude_binary() -> Result<PathBuf> {
+    shared::find_binary(CLAUDE_BINARY_NAMES, "claude CLI")
+}
+
+pub async fn get_claude_version() -> Result<String> {
+    let binary = find_claude_binary()?;
+    let env = collect_env().await;
+    let output = shared::run_with_env(&binary, &["--version"], &env).await?;
+    if !output.status.success() {
+        anyhow::bail!("claude --version returned non-zero exit status");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+pub async fn check_available() -> EngineStatus {
+    match find_claude_binary() {
+        Ok(path) => {
+            let path_str = path.display().to_string();
+            match get_claude_version().await {
+                Ok(version) => EngineStatus {
+                    id: "claude".into(),
+                    display_name: "Claude Code".into(),
+                    available: true,
+                    version: Some(version),
+                    path: Some(path_str),
+                    error: None,
+                },
+                Err(e) => EngineStatus {
+                    id: "claude".into(),
+                    display_name: "Claude Code".into(),
+                    available: true,
+                    version: None,
+                    path: Some(path_str),
+                    error: Some(e.to_string()),
+                },
+            }
+        }
+        Err(e) => EngineStatus {
+            id: "claude".into(),
+            display_name: "Claude Code".into(),
+            available: false,
+            version: None,
+            path: None,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+pub async fn run_claude_command(args: Vec<String>) -> Result<String> {
+    let binary = find_claude_binary()?;
+    let env = collect_env().await;
+
+    let mut cmd = Command::new(&binary);
+    cmd.args(&args);
+    for (k, v) in &env {
+        cmd.env(k, v);
+    }
+
+    let output = cmd.output().await.context("failed to execute claude")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        anyhow::bail!("{}", if stderr.is_empty() { stdout } else { stderr });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+async fn spawn_with_args(args: Vec<String>, message: &str, cwd: Option<&str>) -> Result<Child> {
+    let binary = find_claude_binary()?;
+    let env = collect_env().await;
+
+    let mut cmd = Command::new(&binary);
+    cmd.args(args)
+        .arg(message)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+
+    for (k, v) in &env {
+        cmd.env(k, v);
+    }
+
+    cmd.spawn().context("failed to spawn claude process")
+}
+
+pub async fn spawn_single(
+    conversation_id: &str,
+    message: &str,
+    cwd: Option<&str>,
+) -> Result<Child> {
+    spawn_with_args(
+        vec![
+            "--session-id".into(),
+            conversation_id.into(),
+            "--disallowedTools".into(),
+            "AskUserQuestion".into(),
+            "--print".into(),
+            "--output-format".into(),
+            "stream-json".into(),
+            "--verbose".into(),
+            "--dangerously-skip-permissions".into(),
+        ],
+        message,
+        cwd,
+    )
+    .await
+}
+
+pub async fn spawn_continue(
+    conversation_id: &str,
+    message: &str,
+    cwd: Option<&str>,
+) -> Result<Child> {
+    spawn_with_args(
+        vec![
+            "--resume".into(),
+            conversation_id.into(),
+            "--disallowedTools".into(),
+            "AskUserQuestion".into(),
+            "--print".into(),
+            "--output-format".into(),
+            "stream-json".into(),
+            "--verbose".into(),
+            "--dangerously-skip-permissions".into(),
+        ],
+        message,
+        cwd,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// Claude stream-json parsing
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum ClaudeStreamEvent {
+    #[serde(rename = "message_start")]
+    MessageStart {},
+
+    #[serde(rename = "content_block_delta")]
+    ContentBlockDelta {
+        index: Option<usize>,
+        delta: Delta,
+    },
+
+    #[serde(rename = "content_block_start")]
+    ContentBlockStart {
+        index: Option<usize>,
+        content_block: ContentBlock,
+    },
+
+    #[serde(rename = "message_stop")]
+    MessageStop {},
+
+    #[serde(rename = "error")]
+    Error { error: ErrorData },
+
+    #[serde(rename = "result")]
+    Result {
+        result: String,
+        #[serde(default)]
+        total_cost_usd: Option<f64>,
+        #[serde(default)]
+        duration_ms: Option<u64>,
+        #[serde(default)]
+        num_turns: Option<u64>,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        stop_reason: Option<String>,
+        #[serde(default, rename = "modelUsage")]
+        model_usage: Option<serde_json::Value>,
+    },
+
+    #[serde(rename = "system")]
+    System {
+        #[serde(default)]
+        subtype: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        session_id: Option<String>,
+        #[serde(default)]
+        estimated_tokens: Option<u64>,
+    },
+
+    #[serde(rename = "assistant")]
+    Assistant {
+        #[serde(default)]
+        message: Option<serde_json::Value>,
+    },
+
+    #[serde(rename = "user")]
+    User {
+        #[serde(default)]
+        message: Option<serde_json::Value>,
+    },
+
+    #[serde(rename = "tool_use")]
+    ToolUse {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        input: Option<serde_json::Value>,
+    },
+
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        #[serde(default)]
+        tool_use_id: Option<String>,
+        #[serde(default)]
+        content: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Delta {
+    #[serde(default, rename = "type")]
+    delta_type: Option<String>,
+    text: Option<String>,
+    #[serde(default)]
+    stop_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ContentBlock {
+    #[serde(rename = "type")]
+    content_type: String,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ErrorData {
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+}
+
+fn event_type_label(evt: &ClaudeStreamEvent) -> &'static str {
+    match evt {
+        ClaudeStreamEvent::ContentBlockDelta { .. } => "delta",
+        ClaudeStreamEvent::ContentBlockStart { .. } => "block_start",
+        ClaudeStreamEvent::Result { .. } => "result",
+        ClaudeStreamEvent::MessageStart {} => "message_start",
+        ClaudeStreamEvent::MessageStop {} => "message_stop",
+        ClaudeStreamEvent::System { .. } => "system",
+        ClaudeStreamEvent::Error { .. } => "error",
+        ClaudeStreamEvent::Assistant { .. } => "assistant",
+        ClaudeStreamEvent::User { .. } => "user",
+        ClaudeStreamEvent::ToolUse { .. } => "tool_use",
+        ClaudeStreamEvent::ToolResult { .. } => "tool_result",
+    }
+}
+
+impl ClaudeStreamEvent {
+    fn streaming_text(&self) -> Option<String> {
+        match self {
+            ClaudeStreamEvent::ContentBlockDelta { delta, .. } => delta.text.clone(),
+            ClaudeStreamEvent::ContentBlockStart { content_block, .. } => content_block.text.clone(),
+            ClaudeStreamEvent::Assistant { message } => message.as_ref().and_then(|msg| {
+                msg.get("content")
+                    .and_then(|c| c.as_array())
+                    .and_then(|arr| {
+                        arr.iter().find_map(|block| {
+                            if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                                block
+                                    .get("text")
+                                    .and_then(|t| t.as_str())
+                                    .map(|s| s.to_string())
+                            } else {
+                                None
+                            }
+                        })
+                    })
+            }),
+            _ => None,
+        }
+    }
+
+    fn streaming_thinking(&self) -> Option<String> {
+        match self {
+            ClaudeStreamEvent::Assistant { message } => message.as_ref().and_then(|msg| {
+                msg.get("content").and_then(|c| c.as_array()).and_then(|arr| {
+                    arr.iter().find_map(|block| {
+                        if block.get("type").and_then(|t| t.as_str()) == Some("thinking") {
+                            block
+                                .get("thinking")
+                                .and_then(|t| t.as_str())
+                                .map(|s| s.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                })
+            }),
+            _ => None,
+        }
+    }
+
+    fn tool_events(&self) -> Vec<ToolEvent> {
+        let mut out = Vec::new();
+
+        let starts_from_content =
+            |content: Option<&serde_json::Value>, out: &mut Vec<ToolEvent>| {
+                if let Some(arr) = content.and_then(|c| c.as_array()) {
+                    for block in arr {
+                        if block.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
+                            continue;
+                        }
+                        let id = block
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let name = block.get("name").and_then(|v| v.as_str()).map(String::from);
+                        let input = block.get("input").map(|v| v.to_string());
+                        out.push(ToolEvent {
+                            id,
+                            kind: ToolEventKind::Start { name, input },
+                        });
+                    }
+                }
+            };
+
+        let results_from_content =
+            |content: Option<&serde_json::Value>, out: &mut Vec<ToolEvent>| {
+                if let Some(arr) = content.and_then(|c| c.as_array()) {
+                    for block in arr {
+                        if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+                            continue;
+                        }
+                        let id = block
+                            .get("tool_use_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let content = shared::extract_result_text(block.get("content"));
+                        let is_error = block
+                            .get("is_error")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        out.push(ToolEvent {
+                            id,
+                            kind: ToolEventKind::Result { content, is_error },
+                        });
+                    }
+                }
+            };
+
+        match self {
+            ClaudeStreamEvent::Assistant { message } => {
+                starts_from_content(
+                    message.as_ref().and_then(|m| m.get("content")),
+                    &mut out,
+                );
+            }
+            ClaudeStreamEvent::User { message } => {
+                results_from_content(
+                    message.as_ref().and_then(|m| m.get("content")),
+                    &mut out,
+                );
+            }
+            ClaudeStreamEvent::ToolUse { id, name, input } => {
+                out.push(ToolEvent {
+                    id: id.clone().unwrap_or_default(),
+                    kind: ToolEventKind::Start {
+                        name: name.clone(),
+                        input: input.as_ref().map(|v| v.to_string()),
+                    },
+                });
+            }
+            ClaudeStreamEvent::ToolResult {
+                tool_use_id,
+                content,
+            } => {
+                out.push(ToolEvent {
+                    id: tool_use_id.clone().unwrap_or_default(),
+                    kind: ToolEventKind::Result {
+                        content: content.clone(),
+                        is_error: false,
+                    },
+                });
+            }
+            _ => {}
+        }
+
+        out
+    }
+
+    fn thinking_tokens(&self) -> Option<u64> {
+        match self {
+            ClaudeStreamEvent::System {
+                subtype,
+                estimated_tokens,
+                ..
+            } => {
+                if subtype.as_deref() == Some("thinking_tokens") {
+                    *estimated_tokens
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn usage(&self) -> Option<UsageInfo> {
+        match self {
+            ClaudeStreamEvent::Assistant { message } => {
+                let usage = message.as_ref().and_then(|m| m.get("usage"))?;
+                let input = shared::u64_field(usage, "input_tokens");
+                let output = shared::u64_field(usage, "output_tokens");
+                let cache_read = shared::u64_field(usage, "cache_read_input_tokens");
+                let cache_creation = shared::u64_field(usage, "cache_creation_input_tokens");
+                if input == 0 && output == 0 && cache_read == 0 && cache_creation == 0 {
+                    return None;
+                }
+                Some(UsageInfo {
+                    kind: "turn",
+                    input_tokens: input,
+                    output_tokens: output,
+                    cache_read_tokens: cache_read,
+                    cache_creation_tokens: cache_creation,
+                    cost_usd: None,
+                    duration_ms: None,
+                    num_turns: None,
+                    model: None,
+                    stop_reason: None,
+                })
+            }
+            ClaudeStreamEvent::Result { .. } => self.final_usage(),
+            _ => None,
+        }
+    }
+
+    fn final_usage(&self) -> Option<UsageInfo> {
+        let ClaudeStreamEvent::Result {
+            total_cost_usd,
+            duration_ms,
+            num_turns,
+            model,
+            stop_reason,
+            model_usage,
+            ..
+        } = self
+        else {
+            return None;
+        };
+
+        let mut input = 0u64;
+        let mut output = 0u64;
+        let mut cache_read = 0u64;
+        let mut cache_creation = 0u64;
+        if let Some(models) = model_usage.as_ref().and_then(|m| m.as_object()) {
+            for (_name, m) in models {
+                input += shared::u64_field(m, "inputTokens");
+                output += shared::u64_field(m, "outputTokens");
+                cache_read += shared::u64_field(m, "cacheReadInputTokens");
+                cache_creation += shared::u64_field(m, "cacheCreationInputTokens");
+            }
+        }
+
+        Some(UsageInfo {
+            kind: "final",
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_tokens: cache_read,
+            cache_creation_tokens: cache_creation,
+            cost_usd: *total_cost_usd,
+            duration_ms: *duration_ms,
+            num_turns: *num_turns,
+            model: model.clone(),
+            stop_reason: stop_reason.clone(),
+        })
+    }
+
+    fn final_text(&self) -> Option<String> {
+        match self {
+            ClaudeStreamEvent::Result { result, .. } => Some(result.clone()),
+            ClaudeStreamEvent::Error { error } => error
+                .message
+                .clone()
+                .or_else(|| Some("Unknown error".to_string())),
+            _ => None,
+        }
+    }
+}
+
+fn parse_stream_line(line: &str) -> Option<ClaudeStreamEvent> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    if let Ok(evt) = serde_json::from_str::<ClaudeStreamEvent>(line) {
+        return Some(evt);
+    }
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+        if let Some(result) = val.get("result").and_then(|r| r.as_str()) {
+            return Some(ClaudeStreamEvent::Result {
+                result: result.to_string(),
+                total_cost_usd: val.get("total_cost_usd").and_then(|v| v.as_f64()),
+                duration_ms: val.get("duration_ms").and_then(|v| v.as_u64()),
+                num_turns: val.get("num_turns").and_then(|v| v.as_u64()),
+                model: val.get("model").and_then(|v| v.as_str()).map(String::from),
+                stop_reason: val
+                    .get("stop_reason")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                model_usage: val.get("modelUsage").cloned(),
+            });
+        }
+        if val.get("type").is_some() {
+            if let Ok(evt) = serde_json::from_value::<ClaudeStreamEvent>(val) {
+                return Some(evt);
+            }
+        }
+    }
+    None
+}
+
+pub fn parse_line(line: &str) -> Vec<NormalizedEvent> {
+    let Some(evt) = parse_stream_line(line) else {
+        return vec![];
+    };
+
+    let mut out = Vec::new();
+    let label = event_type_label(&evt);
+
+    if let Some(text) = evt.streaming_text() {
+        out.push(NormalizedEvent::TextDelta {
+            text,
+            event_type: label,
+        });
+    }
+
+    if let Some(thinking) = evt.streaming_thinking() {
+        out.push(NormalizedEvent::ThinkingText { content: thinking });
+    }
+
+    for te in evt.tool_events() {
+        out.push(NormalizedEvent::Tool(te));
+    }
+
+    if let Some(tokens) = evt.thinking_tokens() {
+        out.push(NormalizedEvent::ThinkingTokens { tokens });
+    }
+
+    if let Some(u) = evt.usage() {
+        out.push(NormalizedEvent::Usage(u));
+    }
+
+    if let Some(text) = evt.final_text() {
+        if matches!(evt, ClaudeStreamEvent::Result { .. }) {
+            out.push(NormalizedEvent::Final { text });
+        } else if matches!(evt, ClaudeStreamEvent::Error { .. }) {
+            out.push(NormalizedEvent::Error { message: text });
+        }
+    }
+
+    out
+}
