@@ -11,7 +11,6 @@ import Terminal from "./Terminal";
 interface RightPanelProps {
   workspacePath: string;
   previewTarget: PreviewTarget | null;
-  onClose: () => void;
 }
 
 type Tab = "files" | "preview" | "git" | "browser" | "terminal";
@@ -38,7 +37,7 @@ function languageFromExt(ext: string): string {
   return map[ext] ?? ext;
 }
 
-export default function RightPanel({ workspacePath, previewTarget, onClose }: RightPanelProps) {
+export default function RightPanel({ workspacePath, previewTarget }: RightPanelProps) {
   const [tab, setTab] = useState<Tab>("files");
   const [currentPath, setCurrentPath] = useState(workspacePath);
   const [entries, setEntries] = useState<FileEntry[]>([]);
@@ -62,6 +61,17 @@ export default function RightPanel({ workspacePath, previewTarget, onClose }: Ri
   // Browser state
   const [browserUrl, setBrowserUrl] = useState("http://localhost:5173");
   const [iframeUrl, setIframeUrl] = useState("http://localhost:5173");
+
+  // Workspaces whose terminal has been opened at least once. Each gets a
+  // permanently-mounted Terminal (its own PTY) so scrollback and any running
+  // process survive tab switches, panel close/reopen, and workspace switches.
+  const [terminalWs, setTerminalWs] = useState<string[]>([]);
+
+  // Lazily mount a persistent terminal the first time the terminal tab is opened
+  // in a workspace; it then stays alive for the whole session.
+  if (tab === "terminal" && workspacePath && !terminalWs.includes(workspacePath)) {
+    setTerminalWs((prev) => [...prev, workspacePath]);
+  }
 
   const loadDirectory = useCallback(async (path: string) => {
     setLoading(true);
@@ -131,6 +141,19 @@ export default function RightPanel({ workspacePath, previewTarget, onClose }: Ri
     }
   }, [previewTarget, openPreview, openUrl]);
 
+  // The panel no longer remounts on workspace switch (so per-workspace terminals
+  // persist), so reset the workspace-scoped views when the workspace changes.
+  useEffect(() => {
+    /* eslint-disable react-hooks/set-state-in-effect -- legitimate: reset workspace-scoped views on workspace change, since the panel stays mounted */
+    setCurrentPath(workspacePath);
+    setHistory([]);
+    setPreviewFile(null);
+    setPreviewContent(null);
+    setSelectedCommit(null);
+    setGitDiff("");
+    /* eslint-enable react-hooks/set-state-in-effect */
+  }, [workspacePath]);
+
   const viewCommitDiff = async (commit: string) => {
     setSelectedCommit(commit);
     try {
@@ -190,9 +213,10 @@ export default function RightPanel({ workspacePath, previewTarget, onClose }: Ri
         className="w-1 hover:w-1.5 cursor-col-resize bg-transparent hover:bg-[var(--accent)]/50 active:bg-[var(--accent)] transition-all shrink-0" />
 
       <div className="flex-1 flex flex-col bg-[var(--bg-secondary)] border-l border-[var(--border-color)] min-w-0">
-        {/* Header + Tabs */}
+        {/* Header + Tabs. No in-panel close button — the header toolbar toggles
+            the whole panel, so an X here would be redundant. */}
         <div className="shrink-0 border-b border-[var(--border-color)]">
-          <div className="flex items-center justify-between px-4 py-2">
+          <div className="flex items-center px-4 py-2">
             <div className="flex gap-1">
               {([
                 ["files", "📁", "Files"],
@@ -215,14 +239,12 @@ export default function RightPanel({ workspacePath, previewTarget, onClose }: Ri
                 </button>
               ))}
             </div>
-            <button onClick={onClose}
-              className="p-1 rounded-lg hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)] transition-colors">
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                <path d="M4 4L12 12M12 4L4 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" fill="none" />
-              </svg>
-            </button>
           </div>
         </div>
+
+        {/* Tab content area. `relative` lets the persistent terminal layer overlay
+            it without disturbing the files/preview/git/browser layouts. */}
+        <div className="flex-1 flex flex-col relative min-h-0">
 
         {/* === FILES TAB === */}
         {tab === "files" && (
@@ -455,10 +477,22 @@ export default function RightPanel({ workspacePath, previewTarget, onClose }: Ri
         )}
 
         {/* === TERMINAL TAB === */}
-        {tab === "terminal" && (
-          <Terminal id="main" cwd={workspacePath} />
-        )}
+        {/* Persistent per-workspace terminals. Each is mounted once (the first
+            time the terminal tab is opened in that workspace) and kept alive for
+            the session, so scrollback and any running process survive tab
+            switches, panel close/reopen, and workspace switches. Only the active
+            workspace's terminal is shown, and only while the terminal tab is on. */}
+        {terminalWs.map((ws) => (
+          <div
+            key={ws}
+            className="absolute inset-0 flex flex-col"
+            style={{ display: tab === "terminal" && ws === workspacePath ? "flex" : "none" }}
+          >
+            <Terminal id={`term-${ws}`} cwd={ws} />
+          </div>
+        ))}
 
+        </div>
       </div>
     </div>
   );

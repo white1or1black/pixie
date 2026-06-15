@@ -154,6 +154,12 @@ export default function InputBar({
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (e.key === "Enter" && !e.shiftKey) {
+        // While a CJK IME (e.g. pinyin) is mid-composition, Enter confirms the
+        // candidate into the textarea — it must NOT submit the message. Allow
+        // the default composition-confirm behavior by bailing out entirely.
+        // `isComposing` is the standard signal; keyCode 229 is the legacy
+        // fallback some platforms emit during composition.
+        if (e.nativeEvent.isComposing || e.keyCode === 229) return;
         e.preventDefault();
         handleSend();
       }
@@ -320,12 +326,11 @@ export default function InputBar({
               onKeyDown={handleKeyDown}
               placeholder={
                 disabled
-                  ? (disabledHint ?? "Input disabled")
+                  ? (disabledHint ?? "Type a message… (add a workspace to send)")
                   : isGenerating
-                    ? "Waiting for response..."
+                    ? "Type next message… (Enter to send, Shift+Enter for newline)"
                     : "Type a message... (Enter to send, Shift+Enter for newline)"
               }
-              disabled={disabled || isGenerating}
               rows={1}
               className="flex-1 self-center bg-transparent text-[var(--text-primary)] placeholder-[var(--text-secondary)] resize-none outline-none text-sm leading-6 py-0.5 max-h-[192px]"
             />

@@ -601,14 +601,14 @@ export default function MessageBubble({ message, onOpenPreview }: MessageBubbleP
       className={`message-enter flex ${isUser ? "justify-end" : "justify-start"} mb-4`}
     >
       <div
-        className={`max-w-[80%] rounded-2xl px-4 py-3 ${
+        className={`min-w-0 max-w-[80%] overflow-hidden rounded-2xl px-4 py-3 ${
           isUser
             ? "bg-[var(--bg-user-msg)] rounded-br-sm"
             : "bg-[var(--bg-assistant-msg)] rounded-bl-sm"
         }`}
       >
         {isUser ? (
-          <p className="whitespace-pre-wrap text-[var(--text-primary)] text-sm leading-relaxed m-0">
+          <p className="whitespace-pre-wrap [overflow-wrap:anywhere] text-[var(--text-primary)] text-sm leading-relaxed m-0">
             {message.content}
           </p>
         ) : (
@@ -664,6 +664,10 @@ export default function MessageBubble({ message, onOpenPreview }: MessageBubbleP
                             margin: 0,
                             borderRadius: "0 0 8px 8px",
                             fontSize: "0.85em",
+                            // Scroll long lines horizontally inside the bubble
+                            // instead of stretching it past its max width.
+                            overflowX: "auto",
+                            maxWidth: "100%",
                           }}
                         >
                           {codeString}
