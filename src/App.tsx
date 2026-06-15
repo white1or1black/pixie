@@ -10,7 +10,36 @@ import FileExplorer from "./components/RightPanel";
 import { openExternal } from "./openExternal";
 import { useChat } from "./hooks/useChat";
 import { useScheduledTasks } from "./hooks/useScheduledTasks";
-import type { ModelConfig, PreviewRequest, PreviewTarget, SkillEntry, TaskRunRecord } from "./types";
+import type {
+  EngineModelConfigs,
+  PreviewRequest,
+  PreviewTarget,
+  SkillEntry,
+  TaskRunRecord,
+  EngineStatus,
+} from "./types";
+import { AGENT_ENGINES, DEFAULT_ENGINE_MODEL_CONFIGS } from "./types";
+
+function loadEngineModelConfigs(): EngineModelConfigs {
+  try {
+    const stored = localStorage.getItem("pixie-engine-model-configs");
+    if (stored) {
+      const parsed = JSON.parse(stored) as Partial<EngineModelConfigs>;
+      return {
+        claude: { ...DEFAULT_ENGINE_MODEL_CONFIGS.claude, ...parsed.claude },
+        cursor: { ...DEFAULT_ENGINE_MODEL_CONFIGS.cursor, ...parsed.cursor },
+      };
+    }
+    const legacy = localStorage.getItem("pixie-model-config");
+    if (legacy) {
+      return {
+        claude: { ...DEFAULT_ENGINE_MODEL_CONFIGS.claude, ...JSON.parse(legacy) },
+        cursor: { ...DEFAULT_ENGINE_MODEL_CONFIGS.cursor },
+      };
+    }
+  } catch { /* ignore */ }
+  return { ...DEFAULT_ENGINE_MODEL_CONFIGS };
+}
 
 // Brand mark — same art as the app/README icon.
 const iconUrl = new URL("./assets/icon.svg", import.meta.url).href;
@@ -32,7 +61,13 @@ function SplashScreen() {
   );
 }
 
-function ClaudeNotAvailable({ status, onRetry }: { status: import("./types").ClaudeStatus; onRetry: () => void }) {
+function NoEngineAvailable({
+  statuses,
+  onRetry,
+}: {
+  statuses: EngineStatus[];
+  onRetry: () => void;
+}) {
   return (
     <div className="flex flex-col items-center justify-center h-screen bg-[var(--bg-primary)] px-6">
       <div className="w-16 h-16 rounded-2xl bg-red-500/10 flex items-center justify-center mb-6">
@@ -41,14 +76,23 @@ function ClaudeNotAvailable({ status, onRetry }: { status: import("./types").Cla
           <path d="M16 12v8M16 22v2" stroke="#ef4444" strokeWidth="2" strokeLinecap="round" />
         </svg>
       </div>
-      <h2 className="text-xl font-semibold text-[var(--text-primary)] mb-2">Claude CLI Not Found</h2>
-      <p className="text-sm text-[var(--text-secondary)] text-center max-w-md mb-2">
-        The Claude CLI binary could not be found. Please install it first.
+      <h2 className="text-xl font-semibold text-[var(--text-primary)] mb-2">No Agent Engine Available</h2>
+      <p className="text-sm text-[var(--text-secondary)] text-center max-w-md mb-4">
+        Install at least one agent CLI (Claude Code or Cursor Agent) to use Pixie.
       </p>
-      {status.error && <p className="text-xs text-red-400 text-center max-w-md mb-4">{status.error}</p>}
+      <div className="w-full max-w-md space-y-2 mb-4">
+        {statuses.map((s) => (
+          <div key={s.id} className="text-xs text-[var(--text-secondary)] border border-[var(--border-color)] rounded-lg px-3 py-2">
+            <span className="font-medium text-[var(--text-primary)]">{s.display_name}</span>
+            {" — "}
+            {s.available ? "available" : s.error ?? "not found"}
+          </div>
+        ))}
+      </div>
       <div className="flex gap-3">
         <button onClick={onRetry} className="px-4 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-sm font-medium transition-colors">Retry</button>
-        <a href="https://docs.anthropic.com/en/docs/claude-code" target="_blank" rel="noopener noreferrer" className="px-4 py-2 rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-primary)] text-sm font-medium transition-colors hover:opacity-80">Installation Guide</a>
+        <a href="https://docs.anthropic.com/en/docs/claude-code" target="_blank" rel="noopener noreferrer" className="px-4 py-2 rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-primary)] text-sm font-medium transition-colors hover:opacity-80">Claude Code</a>
+        <a href="https://cursor.com/docs/cli/overview" target="_blank" rel="noopener noreferrer" className="px-4 py-2 rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-primary)] text-sm font-medium transition-colors hover:opacity-80">Cursor CLI</a>
       </div>
     </div>
   );
@@ -69,14 +113,7 @@ export default function App() {
   const [systemPrompt, setSystemPrompt] = useState(() => {
     return localStorage.getItem("pixie-system-prompt") ?? "";
   });
-  const [modelConfig, setModelConfig] = useState<ModelConfig>(() => {
-    try {
-      const stored = localStorage.getItem("pixie-model-config");
-      return stored ? JSON.parse(stored) : {};
-    } catch {
-      return {};
-    }
-  });
+  const [engineModelConfigs, setEngineModelConfigs] = useState<EngineModelConfigs>(loadEngineModelConfigs);
   const [skills, setSkills] = useState<SkillEntry[]>([]);
   // Composer drafts are kept per conversation (keyed by conversation id, derived
   // below once activeId is known) so each session binds its own input and
@@ -85,29 +122,33 @@ export default function App() {
   const composerRef = useRef<HTMLTextAreaElement>(null);
 
   const {
-    conversations,
+    unifiedConversations,
     activeConversation,
     activeId,
     isGenerating,
     generatingIds,
-    claudeStatus,
+    engineStatuses,
+    anyEngineAvailable,
+    defaultEngine,
+    setDefaultEngine,
     workspaces,
     activeWorkspace,
     activeWorkspaceId,
+    workspaceFilter,
+    setWorkspaceFilter,
     error,
     addWorkspace,
     removeWorkspace,
-    switchWorkspace,
     createConversation,
     switchConversation,
     deleteConversation,
     sendMessage,
     stopGeneration,
-    refreshClaudeStatus,
+    refreshEngineStatuses,
     clearError,
     addScheduledRun,
     addRunningTask,
-  } = useChat(modelConfig);
+  } = useChat(engineModelConfigs);
 
   // Per-conversation composer draft. Keyed by the active conversation id so each
   // session keeps its own input; a workspace-level scratch key covers the brief
@@ -159,8 +200,8 @@ export default function App() {
   }, [systemPrompt]);
 
   useEffect(() => {
-    localStorage.setItem("pixie-model-config", JSON.stringify(modelConfig));
-  }, [modelConfig]);
+    localStorage.setItem("pixie-engine-model-configs", JSON.stringify(engineModelConfigs));
+  }, [engineModelConfigs]);
 
   // Load skills for the skills picker: user-level always, project-level when a
   // workspace is active. `reloadSkills` is reused after a plugin install/uninstall
@@ -183,7 +224,7 @@ export default function App() {
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === "n") {
         e.preventDefault();
         setMainView("chat");
-        createConversation();
+        createConversation(undefined, defaultEngine);
       }
       if (e.key === "Escape" && isGenerating) {
         e.preventDefault();
@@ -196,11 +237,19 @@ export default function App() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [createConversation, isGenerating, stopGeneration]);
+  }, [createConversation, defaultEngine, isGenerating, stopGeneration]);
 
   const handleThemeChange = useCallback((t: "dark" | "light") => setTheme(t), []);
   const handleSystemPromptChange = useCallback((prompt: string) => setSystemPrompt(prompt), []);
-  const handleModelConfigChange = useCallback((c: ModelConfig) => setModelConfig(c), []);
+  const handleEngineModelConfigChange = useCallback(
+    (engine: keyof EngineModelConfigs, patch: Record<string, string | undefined>) => {
+      setEngineModelConfigs((prev) => ({
+        ...prev,
+        [engine]: { ...prev[engine], ...patch },
+      }));
+    },
+    [],
+  );
 
   // Open a file path or URL in the right-side preview panel (clicked in a chat
   // message). The nonce lets the same target be re-opened.
@@ -218,34 +267,37 @@ export default function App() {
   }, []);
 
   // Show splash while loading
-  if (claudeStatus === null) {
+  if (engineStatuses === null) {
     return <SplashScreen />;
   }
 
-  if (!claudeStatus.available) {
-    return <ClaudeNotAvailable status={claudeStatus} onRetry={refreshClaudeStatus} />;
+  if (!anyEngineAvailable) {
+    return <NoEngineAvailable statuses={engineStatuses} onRetry={refreshEngineStatuses} />;
   }
 
   return (
     <div className="flex h-screen overflow-hidden bg-[var(--bg-primary)] text-[var(--text-primary)]">
       <Sidebar
-        conversations={conversations}
+        entries={unifiedConversations}
         workspaces={workspaces}
-        activeWorkspaceId={activeWorkspaceId}
+        workspaceFilter={workspaceFilter}
         activeId={activeId}
         generatingIds={generatingIds}
-        onSelect={(id) => {
+        onSelect={(id, workspaceId) => {
           setMainView("chat");
-          switchConversation(id);
+          switchConversation(id, workspaceId);
         }}
-        onNew={() => {
+        onNew={(workspaceId) => {
           setMainView("chat");
-          createConversation();
+          createConversation(workspaceId, defaultEngine);
         }}
+        defaultEngine={defaultEngine}
+        onDefaultEngineChange={setDefaultEngine}
+        engineStatuses={engineStatuses}
         onDelete={deleteConversation}
         onAddWorkspace={addWorkspace}
         onRemoveWorkspace={removeWorkspace}
-        onSwitchWorkspace={switchWorkspace}
+        onSetWorkspaceFilter={setWorkspaceFilter}
         onOpenSettings={() => setMainView("settings")}
         onOpenTasks={() => setMainView("tasks")}
         onOpenSkills={() => setMainView("skills")}
@@ -265,7 +317,7 @@ export default function App() {
                   <button
                     onClick={() => {
                       setMainView("chat");
-                      createConversation();
+                      createConversation(undefined, defaultEngine);
                     }}
                     disabled={!activeWorkspace}
                     className="p-1.5 rounded-lg hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
@@ -285,9 +337,24 @@ export default function App() {
                     <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
                   </svg>
                 </button>
-                <h1 className="text-sm font-semibold text-[var(--text-primary)] truncate">
-                  {activeConversation?.title ?? "Pixie"}
-                </h1>
+                <div className="min-w-0">
+                  <h1 className="text-sm font-semibold text-[var(--text-primary)] truncate">
+                    {activeConversation?.title ?? "Pixie"}
+                  </h1>
+                  {activeWorkspace && (
+                    <p className="text-[10px] text-[var(--text-secondary)] truncate" title={activeWorkspace.path}>
+                      📁 {activeWorkspace.name}
+                      {activeConversation && (
+                        <>
+                          <span className="mx-1">·</span>
+                          <span className="text-[var(--accent)]/80">
+                            {AGENT_ENGINES.find((e) => e.id === activeConversation.engine)?.label ?? activeConversation.engine}
+                          </span>
+                        </>
+                      )}
+                    </p>
+                  )}
+                </div>
               </div>
               <div className="flex items-center gap-2">
                 <button
@@ -372,15 +439,17 @@ export default function App() {
 
         {mainView === "settings" && (
           <Settings
-            claudeStatus={claudeStatus}
-            onRefreshStatus={refreshClaudeStatus}
+            engineStatuses={engineStatuses}
+            onRefreshStatus={refreshEngineStatuses}
+            defaultEngine={defaultEngine}
+            onDefaultEngineChange={setDefaultEngine}
             theme={theme}
             onThemeChange={handleThemeChange}
             onClose={() => setMainView("chat")}
             systemPrompt={systemPrompt}
             onSystemPromptChange={handleSystemPromptChange}
-            modelConfig={modelConfig}
-            onModelConfigChange={handleModelConfigChange}
+            engineModelConfigs={engineModelConfigs}
+            onEngineModelConfigChange={handleEngineModelConfigChange}
           />
         )}
       </div>

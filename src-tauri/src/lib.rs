@@ -1,7 +1,12 @@
-mod claude;
+mod engine;
 mod pty;
 
-use claude::{ClaudeProcess, SharedClaudeProcess};
+use engine::{
+    bind_conversation_engine, check_all_engines, conversation_engine_id,
+    init_conversation_engine_map, normalize_engine_id, remember_session_id,
+    resolve_session_id, spawn_continue, spawn_single, AgentProcess, ConversationEngineMap,
+    EngineStatus, NormalizedEvent, SharedAgentProcess,
+};
 use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone, Utc};
 use pty::PtyMap;
 use serde::{Deserialize, Serialize};
@@ -27,11 +32,26 @@ pub struct Conversation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClaudeStatus {
+pub struct EngineStatusResponse {
+    pub id: String,
+    pub display_name: String,
     pub available: bool,
     pub version: Option<String>,
     pub path: Option<String>,
     pub error: Option<String>,
+}
+
+impl From<EngineStatus> for EngineStatusResponse {
+    fn from(s: EngineStatus) -> Self {
+        Self {
+            id: s.id,
+            display_name: s.display_name,
+            available: s.available,
+            version: s.version,
+            path: s.path,
+            error: s.error,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,19 +187,21 @@ pub struct TaskRunRecord {
 // Application state
 // ---------------------------------------------------------------------------
 
-type ProcessMap = Arc<Mutex<HashMap<String, SharedClaudeProcess>>>;
-/// conversation_id → child pid, so stop_generation can kill the running claude
+type ProcessMap = Arc<Mutex<HashMap<String, SharedAgentProcess>>>;
+/// conversation_id → child pid, so stop_generation can kill the running agent
 /// process without contending for the streaming task's lock.
 type KillRegistry = Arc<Mutex<HashMap<String, u32>>>;
 
 pub struct AppState {
-    /// Per-conversation claude processes for parallel execution
+    /// Per-conversation agent processes for parallel execution
     processes: ProcessMap,
+    /// conversation_id → engine binding (+ external session id for Cursor, etc.)
+    conversation_engines: ConversationEngineMap,
     /// User-selected workspace directory
     workspace: Arc<Mutex<Option<String>>>,
     /// PTY sessions
     pty_map: PtyMap,
-    /// Running claude child pids, for immediate stop without lock contention
+    /// Running agent child pids, for immediate stop without lock contention
     kill_registry: KillRegistry,
 }
 
@@ -206,6 +228,99 @@ pub struct SkillEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Agent event emission (engine-agnostic)
+// ---------------------------------------------------------------------------
+
+fn emit_agent_events(
+    app: &AppHandle,
+    conversation_id: &str,
+    events: &[NormalizedEvent],
+    last_thinking: &mut u64,
+) {
+    for evt in events {
+        if let Some(text) = evt.streaming_text() {
+            let event_type = evt
+                .streaming_text_event_type()
+                .unwrap_or("delta")
+                .to_string();
+            let _ = app.emit(
+                "agent-response",
+                ResponseChunk {
+                    conversation_id: conversation_id.to_string(),
+                    content: text,
+                    event_type,
+                },
+            );
+        }
+
+        if let Some(thinking) = evt.streaming_thinking() {
+            let _ = app.emit(
+                "agent-thinking-text",
+                ResponseThinkingText {
+                    conversation_id: conversation_id.to_string(),
+                    content: thinking,
+                },
+            );
+        }
+
+        if let Some(te) = evt.tool_event() {
+            let (kind, name, input, content, is_error) = match &te.kind {
+                engine::ToolEventKind::Start { name, input } => {
+                    ("start", name.clone(), input.clone(), None, false)
+                }
+                engine::ToolEventKind::Result { content, is_error } => {
+                    ("result", None, None, content.clone(), *is_error)
+                }
+            };
+            let _ = app.emit(
+                "agent-tool",
+                ResponseTool {
+                    conversation_id: conversation_id.to_string(),
+                    tool_use_id: te.id.clone(),
+                    kind: kind.to_string(),
+                    name,
+                    input,
+                    content,
+                    is_error,
+                },
+            );
+        }
+
+        if let Some(tokens) = evt.thinking_tokens() {
+            if tokens >= last_thinking.saturating_add(8) {
+                *last_thinking = tokens;
+                let _ = app.emit(
+                    "agent-thinking",
+                    ResponseThinking {
+                        conversation_id: conversation_id.to_string(),
+                        tokens,
+                    },
+                );
+            }
+        }
+
+        if let Some(u) = evt.usage() {
+            let _ = app.emit(
+                "agent-usage",
+                ResponseUsage {
+                    conversation_id: conversation_id.to_string(),
+                    kind: u.kind.to_string(),
+                    input_tokens: u.input_tokens,
+                    output_tokens: u.output_tokens,
+                    cache_read_tokens: u.cache_read_tokens,
+                    cache_creation_tokens: u.cache_creation_tokens,
+                    cost_usd: u.cost_usd,
+                    duration_ms: u.duration_ms,
+                    num_turns: u.num_turns,
+                    model: u.model.clone(),
+                    stop_reason: u.stop_reason.clone(),
+                },
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tauri commands
 // ---------------------------------------------------------------------------
 
@@ -213,64 +328,107 @@ pub struct SkillEntry {
 async fn send_message(
     message: String,
     conversation_id: String,
+    engine: Option<String>,
     is_continue: Option<bool>,
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     let is_continue = is_continue.unwrap_or(false);
-    log::info!("[send_message] start: conv_id={}, is_continue={}, msg_len={}",
-        conversation_id, is_continue, message.len());
+    let engine_id = match engine.as_deref() {
+        Some(e) => normalize_engine_id(e).map_err(|e| e.to_string())?,
+        None => {
+            if let Some(existing) =
+                conversation_engine_id(&state.conversation_engines, &conversation_id).await
+            {
+                normalize_engine_id(&existing).map_err(|e| e.to_string())?
+            } else {
+                "claude"
+            }
+        }
+    };
 
-    // Get or create per-conversation process
+    bind_conversation_engine(
+        &state.conversation_engines,
+        &conversation_id,
+        engine_id,
+    )
+    .await;
+
+    log::info!(
+        "[send_message] start: conv_id={}, engine={}, is_continue={}, msg_len={}",
+        conversation_id,
+        engine_id,
+        is_continue,
+        message.len()
+    );
+
     {
         let mut processes = state.processes.lock().await;
         if !processes.contains_key(&conversation_id) {
-            processes.insert(conversation_id.clone(), Arc::new(Mutex::new(ClaudeProcess::new())));
+            processes.insert(
+                conversation_id.clone(),
+                Arc::new(Mutex::new(AgentProcess::new())),
+            );
         }
     }
 
-    // Get workspace for CWD
     let workspace = state.workspace.lock().await.clone();
+    let session_id =
+        resolve_session_id(&state.conversation_engines, &conversation_id, engine_id).await;
 
-    // Clone references for the spawned task
     let processes = state.processes.clone();
     let kill_registry = state.kill_registry.clone();
+    let conversation_engines = state.conversation_engines.clone();
     let app_handle = app.clone();
     let conv_id = conversation_id.clone();
+    let engine_id_owned = engine_id.to_string();
+    let message_owned = message.clone();
 
-    // Spawn a background task so the command returns immediately
-    // and other conversations can run in parallel
     tokio::spawn(async move {
         let proc_arc = {
             let processes = processes.lock().await;
             processes.get(&conv_id).cloned()
         };
 
-        let Some(proc_arc) = proc_arc else { return; };
+        let Some(proc_arc) = proc_arc else {
+            return;
+        };
         let mut proc = proc_arc.lock().await;
 
-        // Spawn the appropriate claude process
-        // The conversation_id doubles as the Claude CLI --session-id for context continuity
         let spawn_result = if is_continue {
-            proc.spawn_continue(&conv_id, &message, workspace.as_deref()).await
+            spawn_continue(
+                &engine_id_owned,
+                &session_id,
+                &message_owned,
+                workspace.as_deref(),
+            )
+            .await
         } else {
-            proc.spawn_single(&conv_id, &message, workspace.as_deref()).await
+            spawn_single(
+                &engine_id_owned,
+                &session_id,
+                &message_owned,
+                workspace.as_deref(),
+            )
+            .await
         };
 
-        if let Err(e) = spawn_result {
-            log::error!("[send_message] spawn failed: {}", e);
-            let _ = app_handle.emit(
-                "claude-error",
-                ResponseError {
-                    conversation_id: conv_id.clone(),
-                    error: format!("Failed to start claude: {}", e),
-                },
-            );
-            return;
-        }
+        let child = match spawn_result {
+            Err(e) => {
+                log::error!("[send_message] spawn failed: {}", e);
+                let _ = app_handle.emit(
+                    "agent-error",
+                    ResponseError {
+                        conversation_id: conv_id.clone(),
+                        error: format!("Failed to start {}: {}", engine_id_owned, e),
+                    },
+                );
+                return;
+            }
+            Ok(child) => child,
+        };
+        proc.set_child(child);
 
-        // Register the child pid so stop_generation can kill it immediately without
-        // contending for `proc_arc` (which this task holds for the whole stream read).
         if let Some(pid) = proc.child_pid() {
             log::info!("[send_message] registered pid {} for conv {}", pid, conv_id);
             kill_registry.lock().await.insert(conv_id.clone(), pid);
@@ -278,127 +436,35 @@ async fn send_message(
 
         log::info!("[send_message] process spawned, reading stream...");
 
-        // Clone for use after the stream closure
         let app_after = app_handle.clone();
         let conv_id_after = conv_id.clone();
-
-        // Throttle thinking-token updates: only emit when the estimate jumps by >= 8.
+        let engines_after = conversation_engines.clone();
+        let engine_for_stream = engine_id_owned.clone();
         let mut last_thinking: u64 = 0;
 
         let result = proc
-            .read_stream(move |evt| {
-                let evt_type = match evt {
-                    claude::ClaudeStreamEvent::ContentBlockDelta { .. } => "delta",
-                    claude::ClaudeStreamEvent::ContentBlockStart { .. } => "block_start",
-                    claude::ClaudeStreamEvent::Result { .. } => "result",
-                    claude::ClaudeStreamEvent::MessageStart {} => "message_start",
-                    claude::ClaudeStreamEvent::MessageStop {} => "message_stop",
-                    claude::ClaudeStreamEvent::System { .. } => "system",
-                    claude::ClaudeStreamEvent::Error { .. } => "error",
-                    claude::ClaudeStreamEvent::Assistant { .. } => "assistant",
-                    claude::ClaudeStreamEvent::User { .. } => "user",
-                    claude::ClaudeStreamEvent::ToolUse { .. } => "tool_use",
-                    claude::ClaudeStreamEvent::ToolResult { .. } => "tool_result",
-                };
-
-                // Emit streaming text for real-time display (assistant, deltas)
-                if let Some(text) = evt.streaming_text() {
-                    log::info!("[stream] streaming: event_type={}, text_len={}", evt_type, text.len());
-                    let _ = app_handle.emit(
-                        "claude-response",
-                        ResponseChunk {
-                            conversation_id: conv_id.clone(),
-                            content: text,
-                            event_type: evt_type.to_string(),
-                        },
-                    );
-                }
-
-                // Emit the model's reasoning (thinking) text so the UI can show
-                // what it is reasoning about during the "thinking" gap.
-                if let Some(thinking) = evt.streaming_thinking() {
-                    let _ = app_handle.emit(
-                        "claude-thinking-text",
-                        ResponseThinkingText {
-                            conversation_id: conv_id.clone(),
-                            content: thinking,
-                        },
-                    );
-                }
-
-                // Emit live tool-use activity so the UI can show what Claude is doing
-                for te in evt.tool_events() {
-                    let (kind, name, input, content, is_error) = match te.kind {
-                        claude::ToolEventKind::Start { name, input } => {
-                            ("start", name, input, None, false)
-                        }
-                        claude::ToolEventKind::Result { content, is_error } => {
-                            ("result", None, None, content, is_error)
-                        }
-                    };
-                    let _ = app_handle.emit(
-                        "claude-tool",
-                        ResponseTool {
-                            conversation_id: conv_id.clone(),
-                            tool_use_id: te.id,
-                            kind: kind.to_string(),
-                            name,
-                            input,
-                            content,
-                            is_error,
-                        },
-                    );
-                }
-
-                // Emit live thinking-token estimate (throttled)
-                if let Some(tokens) = evt.thinking_tokens() {
-                    if tokens >= last_thinking.saturating_add(8) {
-                        last_thinking = tokens;
-                        let _ = app_handle.emit(
-                            "claude-thinking",
-                            ResponseThinking {
-                                conversation_id: conv_id.clone(),
-                                tokens,
-                            },
-                        );
+            .read_stream(&engine_for_stream, |events| {
+                for evt in events {
+                    if let Some(sid) = evt.session_id() {
+                        let engines = engines_after.clone();
+                        let conv = conv_id.clone();
+                        let eng = engine_id_owned.clone();
+                        tokio::spawn(async move {
+                            remember_session_id(&engines, &conv, &eng, &sid).await;
+                        });
                     }
                 }
-
-                // Emit per-turn and final usage for token/cost display
-                if let Some(u) = evt.usage() {
-                    let _ = app_handle.emit(
-                        "claude-usage",
-                        ResponseUsage {
-                            conversation_id: conv_id.clone(),
-                            kind: u.kind.to_string(),
-                            input_tokens: u.input_tokens,
-                            output_tokens: u.output_tokens,
-                            cache_read_tokens: u.cache_read_tokens,
-                            cache_creation_tokens: u.cache_creation_tokens,
-                            cost_usd: u.cost_usd,
-                            duration_ms: u.duration_ms,
-                            num_turns: u.num_turns,
-                            model: u.model,
-                            stop_reason: u.stop_reason,
-                        },
-                    );
-                }
-
-                // Capture final text from result event only
-                if let Some(text) = evt.final_text() {
-                    log::info!("[stream] final: event_type={}, text_len={}", evt_type, text.len());
-                }
+                emit_agent_events(&app_handle, &conv_id, events, &mut last_thinking);
             })
             .await;
 
-        // Stream finished (naturally or because stop killed the pid): clear the registry entry.
         kill_registry.lock().await.remove(&conv_id_after);
 
         match result {
             Ok(full_text) => {
                 log::info!("[send_message] done, total_len={}", full_text.len());
                 let _ = app_after.emit(
-                    "claude-done",
+                    "agent-done",
                     ResponseDone {
                         conversation_id: conv_id_after,
                         full_text,
@@ -408,7 +474,7 @@ async fn send_message(
             Err(e) => {
                 log::error!("[send_message] stream error: {}", e);
                 let _ = app_after.emit(
-                    "claude-error",
+                    "agent-error",
                     ResponseError {
                         conversation_id: conv_id_after,
                         error: e.to_string(),
@@ -793,7 +859,7 @@ fn list_skills(workspace: Option<String>) -> Result<Vec<SkillEntry>, String> {
 /// raw JSON string for the frontend to parse.
 #[tauri::command]
 async fn plugin_marketplace_list() -> Result<String, String> {
-    claude::run_claude_command(vec![
+    engine::claude::run_claude_command(vec![
         "plugin".into(),
         "marketplace".into(),
         "list".into(),
@@ -807,7 +873,7 @@ async fn plugin_marketplace_list() -> Result<String, String> {
 /// all added marketplaces, as the raw JSON string for the frontend to parse.
 #[tauri::command]
 async fn plugin_available() -> Result<String, String> {
-    claude::run_claude_command(vec![
+    engine::claude::run_claude_command(vec![
         "plugin".into(),
         "list".into(),
         "--json".into(),
@@ -825,13 +891,13 @@ async fn plugin_marketplace_add(source: String, scope: Option<String>) -> Result
         args.push("--scope".into());
         args.push(s);
     }
-    claude::run_claude_command(args).await.map_err(|e| e.to_string())
+    engine::claude::run_claude_command(args).await.map_err(|e| e.to_string())
 }
 
 /// Remove a configured marketplace by name.
 #[tauri::command]
 async fn plugin_marketplace_remove(name: String) -> Result<String, String> {
-    claude::run_claude_command(vec![
+    engine::claude::run_claude_command(vec![
         "plugin".into(),
         "marketplace".into(),
         "remove".into(),
@@ -844,7 +910,7 @@ async fn plugin_marketplace_remove(name: String) -> Result<String, String> {
 /// Install a plugin; `plugin_id` is `name@marketplace`.
 #[tauri::command]
 async fn plugin_install(plugin_id: String) -> Result<String, String> {
-    claude::run_claude_command(vec!["plugin".into(), "install".into(), plugin_id])
+    engine::claude::run_claude_command(vec!["plugin".into(), "install".into(), plugin_id])
         .await
         .map_err(|e| e.to_string())
 }
@@ -852,7 +918,7 @@ async fn plugin_install(plugin_id: String) -> Result<String, String> {
 /// Uninstall an installed plugin by name.
 #[tauri::command]
 async fn plugin_uninstall(name: String) -> Result<String, String> {
-    claude::run_claude_command(vec!["plugin".into(), "uninstall".into(), name])
+    engine::claude::run_claude_command(vec!["plugin".into(), "uninstall".into(), name])
         .await
         .map_err(|e| e.to_string())
 }
@@ -868,10 +934,19 @@ async fn set_active_workspace(
 }
 
 #[tauri::command]
+async fn set_engine_model_config(
+    engine: String,
+    config: HashMap<String, String>,
+) -> Result<(), String> {
+    engine::set_engine_model_config(&engine, config);
+    Ok(())
+}
+
+#[tauri::command]
 async fn set_model_config(
     config: HashMap<String, String>,
 ) -> Result<(), String> {
-    claude::set_model_config_overrides(config);
+    engine::set_model_config_overrides(config);
     Ok(())
 }
 
@@ -1065,32 +1140,17 @@ async fn delete_conversation(
 }
 
 #[tauri::command]
-async fn check_claude_available() -> Result<ClaudeStatus, String> {
-    match claude::find_claude_binary() {
-        Ok(path) => {
-            let path_str = path.display().to_string();
-            match claude::get_claude_version().await {
-                Ok(version) => Ok(ClaudeStatus {
-                    available: true,
-                    version: Some(version),
-                    path: Some(path_str),
-                    error: None,
-                }),
-                Err(e) => Ok(ClaudeStatus {
-                    available: true,
-                    version: None,
-                    path: Some(path_str),
-                    error: Some(e.to_string()),
-                }),
-            }
-        }
-        Err(e) => Ok(ClaudeStatus {
-            available: false,
-            version: None,
-            path: None,
-            error: Some(e.to_string()),
-        }),
-    }
+async fn check_engines_available() -> Result<Vec<EngineStatusResponse>, String> {
+    Ok(check_all_engines()
+        .await
+        .into_iter()
+        .map(EngineStatusResponse::from)
+        .collect())
+}
+
+#[tauri::command]
+async fn check_engine_available(engine: String) -> Result<EngineStatusResponse, String> {
+    Ok(engine::check_engine(&engine).await.into())
 }
 
 // ---------------------------------------------------------------------------
@@ -1322,12 +1382,17 @@ async fn run_task_headless(app: AppHandle, task: ScheduledTask, conversation_id:
         return;
     }
 
-    let mut proc = ClaudeProcess::new();
-    let spawn_result = proc
-        .spawn_single(&conversation_id, &task.prompt, Some(&task.workspace))
-        .await;
-
-    if let Err(e) = spawn_result {
+    let mut proc = AgentProcess::new();
+    let child = match spawn_single(
+        "claude",
+        &conversation_id,
+        &task.prompt,
+        Some(&task.workspace),
+    )
+    .await
+    {
+        Ok(child) => child,
+        Err(e) => {
         log::error!("[scheduled] spawn failed for '{}': {}", task.name, e);
         let _ = app
             .notification()
@@ -1354,12 +1419,15 @@ async fn run_task_headless(app: AppHandle, task: ScheduledTask, conversation_id:
             serde_json::json!({ "task_id": task.id, "conversation_id": conversation_id, "status": "error" }),
         );
         return;
-    }
+        }
+    };
+
+    proc.set_child(child);
 
     // Read the stream to completion. The on_event closure is intentionally a no-op:
     // we surface scheduled runs via the recorded result + notification rather than
     // streaming into an interactive chat keyed by the same conversation_id.
-    let result = proc.read_stream(|_evt| {}).await;
+    let result = proc.read_stream("claude", |_events| {}).await;
     let finished = Utc::now();
 
     match result {
@@ -1682,6 +1750,7 @@ pub fn run() {
         })
         .manage(AppState {
             processes: Arc::new(Mutex::new(HashMap::new())),
+            conversation_engines: init_conversation_engine_map(),
             workspace: Arc::new(Mutex::new(None)),
             pty_map: pty::init_pty_map(),
             kill_registry: Arc::new(Mutex::new(HashMap::new())),
@@ -1695,6 +1764,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             send_message,
+            set_engine_model_config,
             set_model_config,
             list_directory,
             read_file_content,
@@ -1722,7 +1792,8 @@ pub fn run() {
             get_conversations,
             save_conversation,
             delete_conversation,
-            check_claude_available,
+            check_engines_available,
+            check_engine_available,
             list_scheduled_tasks,
             create_scheduled_task,
             update_scheduled_task,

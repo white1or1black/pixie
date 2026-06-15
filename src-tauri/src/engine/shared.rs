@@ -1,0 +1,219 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+pub const ENV_EXACT: &[&str] = &[
+    "HOME",
+    "USER",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    "TMPDIR",
+    "NODE_EXTRA_CA_CERTS",
+    "PATH",
+];
+
+async fn load_shell_env() -> HashMap<String, String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+
+    let output = tokio::process::Command::new(&shell)
+        .args(["-i", "-l", "-c", "env"])
+        .output()
+        .await;
+
+    let env_str = match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => return HashMap::new(),
+    };
+
+    let mut env = HashMap::new();
+    for line in env_str.lines() {
+        if let Some((k, v)) = line.split_once('=') {
+            env.insert(k.to_string(), v.to_string());
+        }
+    }
+    env
+}
+
+pub async fn get_shell_env() -> &'static HashMap<String, String> {
+    static SHELL_ENV: OnceLock<HashMap<String, String>> = OnceLock::new();
+    if let Some(env) = SHELL_ENV.get() {
+        return env;
+    }
+    let env = load_shell_env().await;
+    SHELL_ENV.get_or_init(|| env)
+}
+
+static MODEL_CONFIGS: OnceLock<std::sync::Mutex<HashMap<String, HashMap<String, String>>>> =
+    OnceLock::new();
+
+fn get_model_configs() -> &'static std::sync::Mutex<HashMap<String, HashMap<String, String>>> {
+    MODEL_CONFIGS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+pub fn set_engine_model_config(engine: &str, config: HashMap<String, String>) {
+    if let Ok(mut guard) = get_model_configs().lock() {
+        guard.insert(engine.to_string(), config);
+    }
+}
+
+/// Legacy: treat as Claude engine config.
+pub fn set_model_config_overrides(config: HashMap<String, String>) {
+    set_engine_model_config("claude", config);
+}
+
+fn apply_engine_model_config_overrides(engine: &str, env: &mut HashMap<String, String>) {
+    if let Ok(guard) = get_model_configs().lock() {
+        if let Some(overrides) = guard.get(engine) {
+            for (k, v) in overrides {
+                if !v.is_empty() {
+                    env.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+}
+
+pub fn candidate_paths() -> Vec<PathBuf> {
+    let mut paths = vec![];
+
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in path_var.split(':') {
+            paths.push(PathBuf::from(dir));
+        }
+    }
+
+    for p in &["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/snap/bin"] {
+        paths.push(PathBuf::from(p));
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        let home = PathBuf::from(home);
+        let nvm_dir = home.join(".nvm/versions/node");
+        if nvm_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&nvm_dir) {
+                for entry in entries.flatten() {
+                    paths.push(entry.path().join("bin"));
+                }
+            }
+        }
+        paths.push(home.join(".local/bin"));
+        paths.push(home.join(".cursor/bin"));
+    }
+
+    paths
+}
+
+pub fn find_binary(names: &[&str], tool_label: &str) -> anyhow::Result<PathBuf> {
+    for dir in candidate_paths() {
+        for name in names {
+            let candidate = dir.join(name);
+            if candidate.exists() && candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    anyhow::bail!(
+        "{tool_label} not found. Searched in: {}",
+        candidate_paths()
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+pub fn extend_path(env: &mut HashMap<String, String>) {
+    if let Some(path) = env.get_mut("PATH") {
+        let extras = [
+            "/usr/local/bin",
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+        ];
+        let existing: Vec<&str> = path.split(':').collect();
+        let missing: Vec<&str> = extras
+            .iter()
+            .filter(|e| !existing.contains(e))
+            .copied()
+            .collect();
+        for extra in missing {
+            path.push(':');
+            path.push_str(extra);
+        }
+    }
+}
+
+/// Merge process env + login-shell env, filtered by prefix/exact keys.
+pub async fn collect_env(
+    engine_id: &str,
+    prefixes: &[&str],
+    exact: &[&str],
+) -> HashMap<String, String> {
+    let shell_env = get_shell_env().await;
+    let mut merged: HashMap<String, String> = HashMap::new();
+
+    let should_include = |key: &str| -> bool {
+        exact.contains(&key) || prefixes.iter().any(|prefix| key.starts_with(prefix))
+    };
+
+    for (k, v) in std::env::vars() {
+        if should_include(&k) {
+            merged.insert(k, v);
+        }
+    }
+
+    for (k, v) in shell_env {
+        if should_include(k) {
+            merged.insert(k.clone(), v.clone());
+        }
+    }
+
+    extend_path(&mut merged);
+    apply_engine_model_config_overrides(engine_id, &mut merged);
+    merged
+}
+
+pub async fn run_with_env(
+    binary: &Path,
+    args: &[&str],
+    env: &HashMap<String, String>,
+) -> anyhow::Result<std::process::Output> {
+    let mut cmd = tokio::process::Command::new(binary);
+    cmd.args(args);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    cmd.output()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to execute {}: {e}", binary.display()))
+}
+
+pub fn u64_field(obj: &serde_json::Value, key: &str) -> u64 {
+    obj.get(key)
+        .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|i| i.max(0) as u64)))
+        .unwrap_or(0)
+}
+
+pub fn extract_result_text(value: Option<&serde_json::Value>) -> Option<String> {
+    match value {
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(serde_json::Value::Array(arr)) => {
+            let mut buf = String::new();
+            for block in arr {
+                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                    if !buf.is_empty() {
+                        buf.push('\n');
+                    }
+                    buf.push_str(text);
+                }
+            }
+            if buf.is_empty() {
+                None
+            } else {
+                Some(buf)
+            }
+        }
+        Some(other) => Some(other.to_string()),
+        None => None,
+    }
+}

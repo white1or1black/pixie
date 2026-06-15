@@ -1,10 +1,11 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
   Conversation,
   Message,
-  ClaudeStatus,
+  EngineStatus,
+  AgentEngineId,
   ResponseChunk,
   ResponseDone,
   ResponseError,
@@ -15,16 +16,30 @@ import type {
   MessageUsage,
   ToolStep,
   WorkspaceState,
-  ModelConfig,
+  EngineModelConfigs,
   TaskRunRecord,
 } from "../types";
+import { AGENT_ENGINES } from "../types";
 
 const DATA_KEY = "pixie-data";
+const DEFAULT_ENGINE_KEY = "pixie-default-engine";
+
+function normalizeConversation(conv: Conversation): Conversation {
+  return {
+    ...conv,
+    engine: conv.engine ?? "claude",
+  };
+}
 
 interface AppData {
   workspaces: WorkspaceState[];
   activeWorkspaceId: string | null;
   conversations: Record<string, Conversation[]>; // workspaceId → conversations
+}
+
+export interface ConversationEntry {
+  conversation: Conversation;
+  workspaceId: string;
 }
 
 function generateId(): string {
@@ -51,51 +66,136 @@ function generateTitle(content: string): string {
   return trimmed.slice(0, 57) + "...";
 }
 
-export function useChat(modelConfig: ModelConfig) {
+function findWorkspaceForConversation(
+  all: Record<string, Conversation[]>,
+  convId: string,
+): string | null {
+  for (const [wsId, convs] of Object.entries(all)) {
+    if (convs.some((c) => c.id === convId)) return wsId;
+  }
+  return null;
+}
+
+function patchConversation(
+  prev: Record<string, Conversation[]>,
+  convId: string,
+  updater: (conv: Conversation) => Conversation,
+): Record<string, Conversation[]> {
+  const wsId = findWorkspaceForConversation(prev, convId);
+  if (!wsId) return prev;
+  return {
+    ...prev,
+    [wsId]: (prev[wsId] ?? []).map((c) => (c.id === convId ? updater(c) : c)),
+  };
+}
+
+function flattenConversations(all: Record<string, Conversation[]>): ConversationEntry[] {
+  const entries: ConversationEntry[] = [];
+  for (const [workspaceId, convs] of Object.entries(all)) {
+    for (const conversation of convs) {
+      entries.push({ conversation, workspaceId });
+    }
+  }
+  entries.sort((a, b) => b.conversation.updatedAt - a.conversation.updatedAt);
+  return entries;
+}
+
+function workspaceActivity(
+  wsId: string,
+  allConversations: Record<string, Conversation[]>,
+  generatingIds: Set<string>,
+): { latest: number; running: boolean } {
+  const convs = allConversations[wsId] ?? [];
+  let latest = 0;
+  let running = false;
+  for (const c of convs) {
+    if (c.updatedAt > latest) latest = c.updatedAt;
+    if (generatingIds.has(c.id)) running = true;
+  }
+  return { latest, running };
+}
+
+/** Most recently active first; workspaces with running agents pinned to the top. */
+function sortWorkspacesByActivity(
+  workspaces: WorkspaceState[],
+  allConversations: Record<string, Conversation[]>,
+  generatingIds: Set<string>,
+): WorkspaceState[] {
+  return [...workspaces].sort((a, b) => {
+    const aa = workspaceActivity(a.id, allConversations, generatingIds);
+    const bb = workspaceActivity(b.id, allConversations, generatingIds);
+    if (aa.running !== bb.running) return aa.running ? -1 : 1;
+    if (aa.latest !== bb.latest) return bb.latest - aa.latest;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+export function useChat(engineModelConfigs: EngineModelConfigs) {
   const [workspaces, setWorkspaces] = useState<WorkspaceState[]>([]);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
-  const [conversations, setConversations] = useState<Conversation[]>([]);
   const [allConversations, setAllConversations] = useState<Record<string, Conversation[]>>({});
   const [activeId, setActiveId] = useState<string | null>(null);
+  /** null = show all workspaces in the sidebar */
+  const [workspaceFilter, setWorkspaceFilter] = useState<string | null>(null);
   const [generatingIds, setGeneratingIds] = useState<Set<string>>(new Set());
-  const [claudeStatus, setClaudeStatus] = useState<ClaudeStatus | null>(null);
+  const [engineStatuses, setEngineStatuses] = useState<EngineStatus[] | null>(null);
+  const [defaultEngine, setDefaultEngine] = useState<AgentEngineId>(() => {
+    const stored = localStorage.getItem(DEFAULT_ENGINE_KEY);
+    return stored === "cursor" ? "cursor" : "claude";
+  });
   const [error, setError] = useState<string | null>(null);
-  // Guards the persist effect: never save the empty initial state before the
-  // initial load has restored saved data. Without this, under React StrictMode
-  // (dev) the mount-time persist run writes empty state and wipes localStorage
-  // before the load re-reads it — losing all chat history on every refresh.
   const [loaded, setLoaded] = useState(false);
 
   const unlistenRefs = useRef<Array<() => void>>([]);
   const activeIdRef = useRef<string | null>(activeId);
-  const activeWorkspaceRef = useRef<WorkspaceState | null>(null);
+  const allConversationsRef = useRef(allConversations);
 
   useEffect(() => {
     activeIdRef.current = activeId;
   }, [activeId]);
 
+  useEffect(() => {
+    allConversationsRef.current = allConversations;
+  }, [allConversations]);
+
   const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId) ?? null;
 
-  useEffect(() => {
-    activeWorkspaceRef.current = activeWorkspace;
-  }, [activeWorkspace]);
+  const sortedWorkspaces = useMemo(
+    () => sortWorkspacesByActivity(workspaces, allConversations, generatingIds),
+    [workspaces, allConversations, generatingIds],
+  );
 
-  // Sync model config to Rust backend
-  useEffect(() => {
-    const config: Record<string, string> = {};
-    for (const [k, v] of Object.entries(modelConfig)) {
-      if (v) config[k] = v;
+  const unifiedConversations = useMemo(
+    () => flattenConversations(allConversations),
+    [allConversations],
+  );
+
+  const activeConversation = useMemo(() => {
+    if (!activeId) return null;
+    for (const { conversation } of unifiedConversations) {
+      if (conversation.id === activeId) return conversation;
     }
-    invoke("set_model_config", { config }).catch(() => {});
-  }, [modelConfig]);
+    return null;
+  }, [activeId, unifiedConversations]);
+
+  const isGenerating = activeId ? generatingIds.has(activeId) : false;
+
+  // Sync per-engine model config to Rust backend
+  useEffect(() => {
+    for (const { id } of AGENT_ENGINES) {
+      const cfg = engineModelConfigs[id];
+      const config: Record<string, string> = {};
+      for (const [k, v] of Object.entries(cfg)) {
+        if (v) config[k] = v;
+      }
+      invoke("set_engine_model_config", { engine: id, config }).catch(() => {});
+    }
+  }, [engineModelConfigs]);
 
   // Load data
   useEffect(() => {
     const raw = loadData();
 
-    // Normalize workspace identity to the folder path. Legacy entries used random
-    // UUIDs, which made "delete + re-add the same folder" lose all its chats
-    // (re-adding minted a new id). Keying by path lets re-adding restore them.
     const conversations: Record<string, Conversation[]> = {};
     const seen = new Set<string>();
     const workspaces: WorkspaceState[] = [];
@@ -105,7 +205,7 @@ export function useChat(modelConfig: ModelConfig) {
       workspaces.push({ ...w, id: w.path });
       const byOld = raw.conversations[w.id] ?? [];
       const byPath = raw.conversations[w.path] ?? [];
-      conversations[w.path] = byPath.length >= byOld.length ? byPath : byOld;
+      conversations[w.path] = (byPath.length >= byOld.length ? byPath : byOld).map(normalizeConversation);
     }
     const legacyActivePath = raw.workspaces.find((w) => w.id === raw.activeWorkspaceId)?.path;
     const activeWorkspaceId =
@@ -117,94 +217,77 @@ export function useChat(modelConfig: ModelConfig) {
     setWorkspaces(workspaces);
     setActiveWorkspaceId(activeWorkspaceId);
     setAllConversations(conversations);
+
     const convs = activeWorkspaceId ? (conversations[activeWorkspaceId] ?? []) : [];
-    setConversations(convs);
     if (convs.length > 0) {
       setActiveId(convs[0].id);
+    } else {
+      const flat = flattenConversations(conversations);
+      if (flat.length > 0) {
+        setActiveId(flat[0].conversation.id);
+        setActiveWorkspaceId(flat[0].workspaceId);
+      }
     }
     setLoaded(true);
   }, []);
 
-  // Persist data — only after the initial load completes, so we never overwrite
-  // saved history with the empty initial state.
   useEffect(() => {
     if (!loaded) return;
     saveData(workspaces, activeWorkspaceId, allConversations);
   }, [loaded, workspaces, activeWorkspaceId, allConversations]);
 
-  // Sync active workspace to Rust backend
   useEffect(() => {
     if (activeWorkspace?.path) {
       invoke("set_active_workspace", { path: activeWorkspace.path }).catch(() => {});
     }
   }, [activeWorkspace?.path]);
 
-  // Check Claude availability
   useEffect(() => {
-    invoke<ClaudeStatus>("check_claude_available")
-      .then((status) => setClaudeStatus(status))
+    invoke<EngineStatus[]>("check_engines_available")
+      .then((statuses) => setEngineStatuses(statuses))
       .catch(() =>
-        setClaudeStatus({ available: false, error: "Failed to check Claude availability" })
+        setEngineStatuses([
+          { id: "claude", display_name: "Claude Code", available: false, error: "Failed to check engines" },
+          { id: "cursor", display_name: "Cursor Agent", available: false, error: "Failed to check engines" },
+        ])
       );
   }, []);
 
-  // Listen to Tauri events
+  useEffect(() => {
+    localStorage.setItem(DEFAULT_ENGINE_KEY, defaultEngine);
+  }, [defaultEngine]);
+
+  // Listen to Tauri events — route updates by conversation_id, not active workspace.
   useEffect(() => {
     let mounted = true;
 
     async function setup() {
-      const u1 = await listen<ResponseChunk>("claude-response", (event) => {
-        const chunk = event.payload;
-        setConversations((prev) =>
-          prev.map((conv) => {
-            if (conv.id !== chunk.conversation_id) return conv;
+      const u1 = await listen<ResponseChunk>("agent-response", (event) => {
+        const { conversation_id, content } = event.payload;
+        setAllConversations((prev) =>
+          patchConversation(prev, conversation_id, (conv) => {
             const msgs = [...conv.messages];
             const last = msgs[msgs.length - 1];
             if (last && last.role === "assistant" && last.status === "streaming") {
-              msgs[msgs.length - 1] = { ...last, content: last.content + chunk.content };
+              msgs[msgs.length - 1] = { ...last, content: last.content + content };
             }
             return { ...conv, messages: msgs, updatedAt: Date.now() };
-          })
+          }),
         );
-        // Also update allConversations
-        setAllConversations((prev) => {
-          const wsId = activeWorkspaceRef.current?.id;
-          if (!wsId) return prev;
-          const convs = prev[wsId] ?? [];
-          return {
-            ...prev,
-            [wsId]: convs.map((conv) => {
-              if (conv.id !== chunk.conversation_id) return conv;
-              const msgs = [...conv.messages];
-              const last = msgs[msgs.length - 1];
-              if (last && last.role === "assistant" && last.status === "streaming") {
-                msgs[msgs.length - 1] = { ...last, content: last.content + chunk.content };
-              }
-              return { ...conv, messages: msgs, updatedAt: Date.now() };
-            }),
-          };
-        });
       });
 
-      const u2 = await listen<ResponseDone>("claude-done", (event) => {
+      const u2 = await listen<ResponseDone>("agent-done", (event) => {
         const done = event.payload;
-        const updateConv = (convs: Conversation[]) =>
-          convs.map((conv) => {
-            if (conv.id !== done.conversation_id) return conv;
+        setAllConversations((prev) =>
+          patchConversation(prev, done.conversation_id, (conv) => {
             const msgs = [...conv.messages];
             const last = msgs[msgs.length - 1];
             if (last && last.role === "assistant") {
               msgs[msgs.length - 1] = { ...last, content: done.full_text, status: "done" };
             }
             return { ...conv, messages: msgs, updatedAt: Date.now() };
-          });
-
-        setConversations((prev) => updateConv(prev));
-        setAllConversations((prev) => {
-          const wsId = activeWorkspaceRef.current?.id;
-          if (!wsId) return prev;
-          return { ...prev, [wsId]: updateConv(prev[wsId] ?? []) };
-        });
+          }),
+        );
         setGeneratingIds((prev) => {
           const next = new Set(prev);
           next.delete(done.conversation_id);
@@ -213,26 +296,19 @@ export function useChat(modelConfig: ModelConfig) {
         setError(null);
       });
 
-      const u3 = await listen<ResponseError>("claude-error", (event) => {
+      const u3 = await listen<ResponseError>("agent-error", (event) => {
         const err = event.payload;
         setError(err.error);
-        const errConv = (convs: Conversation[]) =>
-          convs.map((conv) => {
-            if (conv.id !== err.conversation_id) return conv;
+        setAllConversations((prev) =>
+          patchConversation(prev, err.conversation_id, (conv) => {
             const msgs = [...conv.messages];
             const last = msgs[msgs.length - 1];
             if (last && last.role === "assistant") {
               msgs[msgs.length - 1] = { ...last, status: "error" };
             }
             return { ...conv, messages: msgs };
-          });
-
-        setConversations((prev) => errConv(prev));
-        setAllConversations((prev) => {
-          const wsId = activeWorkspaceRef.current?.id;
-          if (!wsId) return prev;
-          return { ...prev, [wsId]: errConv(prev[wsId] ?? []) };
-        });
+          }),
+        );
         setGeneratingIds((prev) => {
           const next = new Set(prev);
           next.delete(err.conversation_id);
@@ -240,12 +316,10 @@ export function useChat(modelConfig: ModelConfig) {
         });
       });
 
-      const u4 = await listen<ResponseTool>("claude-tool", (event) => {
+      const u4 = await listen<ResponseTool>("agent-tool", (event) => {
         const tool = event.payload;
-        // Apply a tool-step update to the last assistant message of the target conversation
-        const applyTool = (convs: Conversation[]): Conversation[] =>
-          convs.map((conv) => {
-            if (conv.id !== tool.conversation_id) return conv;
+        setAllConversations((prev) =>
+          patchConversation(prev, tool.conversation_id, (conv) => {
             const msgs = [...conv.messages];
             const last = msgs[msgs.length - 1];
             if (!last || last.role !== "assistant") return conv;
@@ -284,47 +358,33 @@ export function useChat(modelConfig: ModelConfig) {
 
             msgs[msgs.length - 1] = { ...last, tools };
             return { ...conv, messages: msgs, updatedAt: Date.now() };
-          });
-
-        setConversations((prev) => applyTool(prev));
-        setAllConversations((prev) => {
-          const wsId = activeWorkspaceRef.current?.id;
-          if (!wsId) return prev;
-          return { ...prev, [wsId]: applyTool(prev[wsId] ?? []) };
-        });
+          }),
+        );
       });
 
-      const u5 = await listen<ResponseThinking>("claude-thinking", (event) => {
+      const u5 = await listen<ResponseThinking>("agent-thinking", (event) => {
         const { conversation_id, tokens } = event.payload;
-        const applyThink = (convs: Conversation[]): Conversation[] =>
-          convs.map((conv) => {
-            if (conv.id !== conversation_id) return conv;
+        setAllConversations((prev) =>
+          patchConversation(prev, conversation_id, (conv) => {
             const msgs = [...conv.messages];
             const last = msgs[msgs.length - 1];
             if (!last || last.role !== "assistant") return conv;
             msgs[msgs.length - 1] = { ...last, thinkingTokens: tokens };
             return { ...conv, messages: msgs, updatedAt: Date.now() };
-          });
-        setConversations((prev) => applyThink(prev));
-        setAllConversations((prev) => {
-          const wsId = activeWorkspaceRef.current?.id;
-          if (!wsId) return prev;
-          return { ...prev, [wsId]: applyThink(prev[wsId] ?? []) };
-        });
+          }),
+        );
       });
 
-      const u6 = await listen<ResponseUsage>("claude-usage", (event) => {
+      const u6 = await listen<ResponseUsage>("agent-usage", (event) => {
         const u = event.payload;
-        const applyUsage = (convs: Conversation[]): Conversation[] =>
-          convs.map((conv) => {
-            if (conv.id !== u.conversation_id) return conv;
+        setAllConversations((prev) =>
+          patchConversation(prev, u.conversation_id, (conv) => {
             const msgs = [...conv.messages];
             const last = msgs[msgs.length - 1];
             if (!last || last.role !== "assistant") return conv;
 
             let usage: MessageUsage;
             if (u.kind === "final") {
-              // Authoritative totals from the result event
               usage = {
                 inputTokens: u.input_tokens,
                 outputTokens: u.output_tokens,
@@ -338,53 +398,41 @@ export function useChat(modelConfig: ModelConfig) {
                 live: false,
               };
             } else {
-              // Per-turn: accumulate into a running total
-              const prev = last.usage ?? {
+              const prevUsage = last.usage ?? {
                 inputTokens: 0,
                 outputTokens: 0,
                 cacheReadTokens: 0,
                 cacheCreationTokens: 0,
               };
               usage = {
-                inputTokens: prev.inputTokens + u.input_tokens,
-                outputTokens: prev.outputTokens + u.output_tokens,
-                cacheReadTokens: prev.cacheReadTokens + u.cache_read_tokens,
-                cacheCreationTokens: prev.cacheCreationTokens + u.cache_creation_tokens,
+                inputTokens: prevUsage.inputTokens + u.input_tokens,
+                outputTokens: prevUsage.outputTokens + u.output_tokens,
+                cacheReadTokens: prevUsage.cacheReadTokens + u.cache_read_tokens,
+                cacheCreationTokens: prevUsage.cacheCreationTokens + u.cache_creation_tokens,
                 live: true,
               };
             }
             msgs[msgs.length - 1] = { ...last, usage };
             return { ...conv, messages: msgs, updatedAt: Date.now() };
-          });
-        setConversations((prev) => applyUsage(prev));
-        setAllConversations((prev) => {
-          const wsId = activeWorkspaceRef.current?.id;
-          if (!wsId) return prev;
-          return { ...prev, [wsId]: applyUsage(prev[wsId] ?? []) };
-        });
+          }),
+        );
       });
 
-      const u7 = await listen<ResponseThinkingText>("claude-thinking-text", (event) => {
+      const u7 = await listen<ResponseThinkingText>("agent-thinking-text", (event) => {
         const { conversation_id, content } = event.payload;
-        const applyThinkText = (convs: Conversation[]): Conversation[] =>
-          convs.map((conv) => {
-            if (conv.id !== conversation_id) return conv;
+        setAllConversations((prev) =>
+          patchConversation(prev, conversation_id, (conv) => {
             const msgs = [...conv.messages];
             const last = msgs[msgs.length - 1];
             if (!last || last.role !== "assistant") return conv;
-            const prev = last.thinking ?? "";
+            const prevText = last.thinking ?? "";
             msgs[msgs.length - 1] = {
               ...last,
-              thinking: prev ? `${prev}\n\n${content}` : content,
+              thinking: prevText ? `${prevText}\n\n${content}` : content,
             };
             return { ...conv, messages: msgs, updatedAt: Date.now() };
-          });
-        setConversations((prev) => applyThinkText(prev));
-        setAllConversations((prev) => {
-          const wsId = activeWorkspaceRef.current?.id;
-          if (!wsId) return prev;
-          return { ...prev, [wsId]: applyThinkText(prev[wsId] ?? []) };
-        });
+          }),
+        );
       });
 
       if (!mounted) { u1(); u2(); u3(); u4(); u5(); u6(); u7(); return; }
@@ -399,108 +447,120 @@ export function useChat(modelConfig: ModelConfig) {
     };
   }, []);
 
-  // Derived state
-  const activeConversation = conversations.find((c) => c.id === activeId) ?? null;
-  const isGenerating = activeId ? generatingIds.has(activeId) : false;
+  const resolveTargetWorkspace = useCallback((): string | null => {
+    return workspaceFilter ?? activeWorkspaceId ?? sortedWorkspaces[0]?.id ?? null;
+  }, [workspaceFilter, activeWorkspaceId, sortedWorkspaces]);
 
-  // --- Workspace actions ---
   const addWorkspace = useCallback(async () => {
     try {
       const path = await invoke<string | null>("select_workspace");
       if (!path) return;
       const name = path.split("/").pop() ?? path;
-      // Identity is the folder path, so re-adding the same folder restores its
-      // chats. Skip duplicating if it's already in the sidebar.
       setWorkspaces((prev) =>
         prev.some((w) => w.path === path) ? prev : [...prev, { id: path, path, name }]
       );
-      setActiveWorkspaceId(path);
-      // Preserve any conversations previously stored for this path.
       setAllConversations((prev) => ({ ...prev, [path]: prev[path] ?? [] }));
-      const existing = allConversations[path] ?? [];
-      setConversations(existing);
-      setActiveId(existing.length > 0 ? existing[0].id : null);
+      setActiveWorkspaceId(path);
     } catch { /* ignore */ }
-  }, [allConversations]);
+  }, []);
 
   const removeWorkspace = useCallback((id: string) => {
     setWorkspaces((prev) => prev.filter((w) => w.id !== id));
-    // Intentionally KEEP allConversations[id] (now keyed by folder path) so that
-    // re-adding the same folder restores its chat history instead of wiping it.
+    if (workspaceFilter === id) setWorkspaceFilter(null);
     if (activeWorkspaceId === id) {
       const remaining = workspaces.filter((w) => w.id !== id);
       const nextActive = remaining[0] ?? null;
       setActiveWorkspaceId(nextActive?.id ?? null);
-      const convs = nextActive ? (allConversations[nextActive.id] ?? []) : [];
-      setConversations(convs);
-      setActiveId(convs.length > 0 ? convs[0].id : null);
+      if (activeId) {
+        const ws = findWorkspaceForConversation(allConversationsRef.current, activeId);
+        if (ws === id) {
+          const flat = flattenConversations(allConversationsRef.current).filter(
+            (e) => e.workspaceId !== id,
+          );
+          if (flat.length > 0) {
+            setActiveId(flat[0].conversation.id);
+            setActiveWorkspaceId(flat[0].workspaceId);
+          } else {
+            setActiveId(null);
+          }
+        }
+      }
     }
-  }, [activeWorkspaceId, workspaces, allConversations]);
+  }, [activeWorkspaceId, activeId, workspaceFilter, workspaces]);
 
-  const switchWorkspace = useCallback((id: string) => {
-    setActiveWorkspaceId(id);
-    setAllConversations((prev) => ({ ...prev, [activeWorkspaceId ?? ""]: conversations }));
-    const convs = allConversations[id] ?? [];
-    setConversations(convs);
-    setActiveId(convs.length > 0 ? convs[0].id : null);
-    setError(null);
-  }, [activeWorkspaceId, conversations, allConversations]);
-
-  // --- Conversation actions ---
-  const createConversation = useCallback(() => {
-    if (!activeWorkspaceId) return "";
+  const createConversation = useCallback((workspaceId?: string, engine?: AgentEngineId) => {
+    const wsId = workspaceId ?? resolveTargetWorkspace();
+    if (!wsId) return "";
     const id = generateId();
     const conv: Conversation = {
       id, title: "New Agent", messages: [],
       createdAt: Date.now(), updatedAt: Date.now(),
+      engine: engine ?? defaultEngine,
     };
-    setConversations((prev) => [conv, ...prev]);
     setAllConversations((prev) => ({
       ...prev,
-      [activeWorkspaceId]: [conv, ...(prev[activeWorkspaceId] ?? [])],
+      [wsId]: [conv, ...(prev[wsId] ?? [])],
     }));
+    setActiveWorkspaceId(wsId);
     setActiveId(id);
     setError(null);
     return id;
-  }, [activeWorkspaceId]);
+  }, [resolveTargetWorkspace, defaultEngine]);
 
-  const switchConversation = useCallback((id: string) => {
+  const switchConversation = useCallback((id: string, workspaceId?: string) => {
+    const wsId =
+      workspaceId ?? findWorkspaceForConversation(allConversationsRef.current, id);
+    if (wsId) setActiveWorkspaceId(wsId);
     setActiveId(id);
     setError(null);
   }, []);
 
-  const deleteConversation = useCallback((id: string) => {
-    setConversations((prev) => prev.filter((c) => c.id !== id));
+  const deleteConversation = useCallback((id: string, workspaceId?: string) => {
+    const wsId =
+      workspaceId ?? findWorkspaceForConversation(allConversationsRef.current, id);
+    if (!wsId) return;
     setAllConversations((prev) => ({
       ...prev,
-      [activeWorkspaceId ?? ""]: (prev[activeWorkspaceId ?? ""] ?? []).filter((c) => c.id !== id),
+      [wsId]: (prev[wsId] ?? []).filter((c) => c.id !== id),
     }));
     invoke("delete_conversation", { conversationId: id }).catch(() => {});
-    if (activeId === id) { setActiveId(null); setError(null); }
-  }, [activeId, activeWorkspaceId]);
+    if (activeId === id) {
+      setActiveId(null);
+      setError(null);
+    }
+  }, [activeId]);
 
   const sendMessage = useCallback(
     async (content: string, convIdOverride?: string) => {
       if (!content.trim()) return;
 
       let convId = convIdOverride ?? activeId;
+      let wsId = convId
+        ? findWorkspaceForConversation(allConversationsRef.current, convId)
+        : null;
 
-      // Create conversation if none is active
       if (!convId) {
-        if (!activeWorkspaceId) return;
+        wsId = resolveTargetWorkspace();
+        if (!wsId) return;
         convId = generateId();
         const conv: Conversation = {
           id: convId, title: generateTitle(content), messages: [],
           createdAt: Date.now(), updatedAt: Date.now(),
+          engine: defaultEngine,
         };
-        setConversations((prev) => [conv, ...prev]);
         setAllConversations((prev) => ({
           ...prev,
-          [activeWorkspaceId]: [conv, ...(prev[activeWorkspaceId] ?? [])],
+          [wsId!]: [conv, ...(prev[wsId!] ?? [])],
         }));
+        setActiveWorkspaceId(wsId);
         setActiveId(convId);
         activeIdRef.current = convId;
       }
+
+      if (!wsId) {
+        wsId = findWorkspaceForConversation(allConversationsRef.current, convId);
+      }
+      if (!wsId) return;
 
       const userMsg: Message = {
         id: generateId(), role: "user", content,
@@ -511,21 +571,9 @@ export function useChat(modelConfig: ModelConfig) {
         timestamp: Date.now(), status: "streaming",
       };
 
-      setConversations((prev) =>
-        prev.map((conv) => {
-          if (conv.id !== convId) return conv;
-          const isFirst = conv.messages.length === 0;
-          return {
-            ...conv,
-            title: isFirst ? generateTitle(content) : conv.title,
-            messages: [...conv.messages, userMsg, assistantMsg],
-            updatedAt: Date.now(),
-          };
-        })
-      );
       setAllConversations((prev) => ({
         ...prev,
-        [activeWorkspaceId ?? ""]: (prev[activeWorkspaceId ?? ""] ?? []).map((conv) => {
+        [wsId!]: (prev[wsId!] ?? []).map((conv) => {
           if (conv.id !== convId) return conv;
           const isFirst = conv.messages.length === 0;
           return {
@@ -540,13 +588,20 @@ export function useChat(modelConfig: ModelConfig) {
       setGeneratingIds((prev) => new Set(prev).add(convId!));
       setError(null);
 
-      const currentConv = conversations.find((c) => c.id === convId);
-      const isContinue = currentConv ? currentConv.messages.filter((m) => m.role === "user").length > 0 : false;
+      const currentConv = allConversationsRef.current[wsId]?.find((c) => c.id === convId);
+      const engine = currentConv?.engine ?? defaultEngine;
+      const isContinue = currentConv
+        ? currentConv.messages.filter((m) => m.role === "user").length > 0
+        : false;
+
+      // Ensure backend cwd matches the conversation's workspace before spawning.
+      await invoke("set_active_workspace", { path: wsId }).catch(() => {});
 
       try {
         await invoke("send_message", {
           message: content,
           conversationId: convId,
+          engine,
           isContinue,
         });
       } catch (e) {
@@ -556,20 +611,19 @@ export function useChat(modelConfig: ModelConfig) {
           next.delete(convId!);
           return next;
         });
-        setConversations((prev) =>
-          prev.map((conv) => {
-            if (conv.id !== convId) return conv;
+        setAllConversations((prev) =>
+          patchConversation(prev, convId!, (conv) => {
             const msgs = [...conv.messages];
             const last = msgs[msgs.length - 1];
             if (last && last.role === "assistant") {
               msgs[msgs.length - 1] = { ...last, status: "error" };
             }
             return { ...conv, messages: msgs };
-          })
+          }),
         );
       }
     },
-    [activeId, conversations, activeWorkspaceId]
+    [activeId, resolveTargetWorkspace, defaultEngine],
   );
 
   const stopGeneration = useCallback(async (convId?: string) => {
@@ -583,23 +637,20 @@ export function useChat(modelConfig: ModelConfig) {
       next.delete(targetId);
       return next;
     });
-    setConversations((prev) =>
-      prev.map((conv) => {
-        if (conv.id !== targetId) return conv;
+    setAllConversations((prev) =>
+      patchConversation(prev, targetId, (conv) => {
         const msgs = [...conv.messages];
         const last = msgs[msgs.length - 1];
         if (last && last.role === "assistant" && last.status === "streaming") {
           msgs[msgs.length - 1] = { ...last, status: "done" };
         }
         return { ...conv, messages: msgs };
-      })
+      }),
     );
   }, [activeId]);
 
   const clearError = useCallback(() => { setError(null); }, []);
 
-  // Inject a completed scheduled-task run as a Conversation in its workspace, so the
-  // result is viewable in the sidebar like any chat (deduped by run id; idempotent).
   const addScheduledRun = useCallback((run: TaskRunRecord) => {
     const startedMs = Date.parse(run.started_at) || Date.now();
     const finishedMs = Date.parse(run.finished_at) || startedMs;
@@ -608,6 +659,7 @@ export function useChat(modelConfig: ModelConfig) {
       title: run.task_name || generateTitle(run.prompt),
       createdAt: startedMs,
       updatedAt: finishedMs,
+      engine: "claude",
       messages: [
         { id: generateId(), role: "user", content: run.prompt, timestamp: startedMs },
         {
@@ -627,18 +679,13 @@ export function useChat(modelConfig: ModelConfig) {
       const without = list.filter((c) => c.id !== conv.id);
       return { ...prev, [wsId]: [conv, ...without] };
     });
-    if (wsId === activeWorkspaceId) {
-      setConversations((prev) => {
-        const without = prev.filter((c) => c.id !== conv.id);
-        return [conv, ...without];
-      });
-    }
-  }, [activeWorkspaceId]);
+    setGeneratingIds((prev) => {
+      const next = new Set(prev);
+      next.delete(conv.id);
+      return next;
+    });
+  }, []);
 
-  // Optimistically surface a just-kicked-off scheduled run as a "Running…"
-  // placeholder conversation in its workspace and navigate there. Keyed by the
-  // conversation_id the backend returns synchronously from run-now, so the
-  // placeholder is seamlessly replaced when addScheduledRun fires on completion.
   const addRunningTask = useCallback(
     (opts: { id: string; taskName: string; prompt: string; workspace: string }) => {
       const now = Date.now();
@@ -647,57 +694,60 @@ export function useChat(modelConfig: ModelConfig) {
         title: opts.taskName || generateTitle(opts.prompt),
         createdAt: now,
         updatedAt: now,
+        engine: "claude",
         messages: [
           { id: generateId(), role: "user", content: opts.prompt, timestamp: now, status: "done" },
           { id: generateId(), role: "assistant", content: "Running…", timestamp: now, status: "streaming" },
         ],
       };
-      // Save the current workspace's conversations, switch to the task's
-      // workspace, and surface the placeholder there.
       setAllConversations((prev) => {
-        const saved = { ...prev, [activeWorkspaceId ?? ""]: conversations };
-        const list = saved[opts.workspace] ?? [];
+        const list = prev[opts.workspace] ?? [];
         const without = list.filter((c) => c.id !== conv.id);
-        return { ...saved, [opts.workspace]: [conv, ...without] };
+        return { ...prev, [opts.workspace]: [conv, ...without] };
       });
-      const targetList = (allConversations[opts.workspace] ?? []).filter((c) => c.id !== conv.id);
-      setConversations([conv, ...targetList]);
+      setGeneratingIds((prev) => new Set(prev).add(conv.id));
       setActiveWorkspaceId(opts.workspace);
       setActiveId(conv.id);
       setError(null);
     },
-    [activeWorkspaceId, conversations, allConversations]
+    [],
   );
 
-  const refreshClaudeStatus = useCallback(async () => {
+  const refreshEngineStatuses = useCallback(async () => {
     try {
-      const status = await invoke<ClaudeStatus>("check_claude_available");
-      setClaudeStatus(status);
+      const statuses = await invoke<EngineStatus[]>("check_engines_available");
+      setEngineStatuses(statuses);
     } catch {
-      setClaudeStatus({ available: false, error: "Failed to check" });
+      setEngineStatuses(null);
     }
   }, []);
 
+  const anyEngineAvailable = (engineStatuses ?? []).some((s) => s.available);
+
   return {
-    conversations,
+    unifiedConversations,
     activeConversation,
     activeId,
     isGenerating,
     generatingIds,
-    claudeStatus,
-    workspaces,
+    engineStatuses,
+    anyEngineAvailable,
+    defaultEngine,
+    setDefaultEngine,
+    workspaces: sortedWorkspaces,
     activeWorkspace,
     activeWorkspaceId,
+    workspaceFilter,
+    setWorkspaceFilter,
     error,
     addWorkspace,
     removeWorkspace,
-    switchWorkspace,
     createConversation,
     switchConversation,
     deleteConversation,
     sendMessage,
     stopGeneration,
-    refreshClaudeStatus,
+    refreshEngineStatuses,
     clearError,
     addScheduledRun,
     addRunningTask,

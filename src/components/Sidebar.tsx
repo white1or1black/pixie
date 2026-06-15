@@ -1,23 +1,28 @@
-import { useState, useMemo } from "react";
-import type { Conversation, WorkspaceState } from "../types";
+import { useState, useMemo, useEffect } from "react";
+import type { ConversationEntry } from "../hooks/useChat";
+import type { WorkspaceState, AgentEngineId, EngineStatus } from "../types";
+import { AGENT_ENGINES } from "../types";
 
 interface SidebarProps {
-  conversations: Conversation[];
+  entries: ConversationEntry[];
   workspaces: WorkspaceState[];
-  activeWorkspaceId: string | null;
+  workspaceFilter: string | null;
   activeId: string | null;
   generatingIds: Set<string>;
-  onSelect: (id: string) => void;
-  onNew: () => void;
-  onDelete: (id: string) => void;
+  onSelect: (id: string, workspaceId: string) => void;
+  onNew: (workspaceId?: string) => void;
+  onDelete: (id: string, workspaceId: string) => void;
   onAddWorkspace: () => void;
   onRemoveWorkspace: (id: string) => void;
-  onSwitchWorkspace: (id: string) => void;
+  onSetWorkspaceFilter: (id: string | null) => void;
   onOpenSettings: () => void;
   onOpenTasks: () => void;
   onOpenSkills: () => void;
   isOpen: boolean;
   onClose: () => void;
+  defaultEngine: AgentEngineId;
+  onDefaultEngineChange: (engine: AgentEngineId) => void;
+  engineStatuses: EngineStatus[];
 }
 
 function relativeTime(ts: number): string {
@@ -32,10 +37,163 @@ function relativeTime(ts: number): string {
   return new Date(ts).toLocaleDateString();
 }
 
-export default function Sidebar({
-  conversations,
+function workspaceName(workspaces: WorkspaceState[], id: string): string {
+  return workspaces.find((w) => w.id === id)?.name ?? id.split("/").pop() ?? id;
+}
+
+/** Sessions updated within this window stay in the Active section. */
+const ACTIVE_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000;
+
+function isActiveEntry(entry: ConversationEntry, generatingIds: Set<string>): boolean {
+  if (generatingIds.has(entry.conversation.id)) return true;
+  return Date.now() - entry.conversation.updatedAt < ACTIVE_THRESHOLD_MS;
+}
+
+function sortEntries(entries: ConversationEntry[], generatingIds: Set<string>): ConversationEntry[] {
+  return [...entries].sort((a, b) => {
+    const aRun = generatingIds.has(a.conversation.id);
+    const bRun = generatingIds.has(b.conversation.id);
+    if (aRun !== bRun) return aRun ? -1 : 1;
+    return b.conversation.updatedAt - a.conversation.updatedAt;
+  });
+}
+
+function ConversationRow({
+  entry,
+  workspaceLabel,
+  isActive,
+  isGenerating,
+  onSelect,
+  onDelete,
+}: {
+  entry: ConversationEntry;
+  workspaceLabel: string;
+  isActive: boolean;
+  isGenerating: boolean;
+  onSelect: () => void;
+  onDelete: () => void;
+}) {
+  const { conversation: conv } = entry;
+  return (
+    <div
+      onClick={onSelect}
+      className={`
+        group flex items-center gap-2 px-3 py-2.5 rounded-lg cursor-pointer mb-0.5
+        transition-colors
+        ${
+          isActive
+            ? "bg-[var(--bg-tertiary)] text-[var(--text-primary)]"
+            : "text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40"
+        }
+      `}
+    >
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-1.5">
+          {isGenerating && (
+            <span className="shrink-0 w-2 h-2 rounded-full bg-green-400 animate-pulse" title="Generating..." />
+          )}
+          <p className="text-sm truncate leading-tight">{conv.title}</p>
+        </div>
+          <p className="text-[10px] mt-0.5 opacity-60 truncate">
+          <span className="text-[var(--accent)]/80">{workspaceLabel}</span>
+          <span className="mx-1">·</span>
+          <span>{AGENT_ENGINES.find((e) => e.id === conv.engine)?.label ?? conv.engine}</span>
+          <span className="mx-1">·</span>
+          {relativeTime(conv.updatedAt)}
+        </p>
+      </div>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete();
+        }}
+        className="opacity-0 group-hover:opacity-100 shrink-0 p-1 rounded hover:bg-red-500/20 text-red-400 transition-opacity"
+        title="Delete conversation"
+      >
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
+          <path d="M4.5 2h5a.5.5 0 010 1h-5a.5.5 0 010-1zM3 4h8l-.7 8.4a1 1 0 01-1 .9H4.7a1 1 0 01-1-.9L3 4zm2.5 2v5M7 6v5M8.5 6v5" stroke="currentColor" strokeWidth="1" fill="none" strokeLinecap="round" />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
+function SectionHeader({
+  label,
+  count,
+  expanded,
+  onToggle,
+  collapsible,
+}: {
+  label: string;
+  count: number;
+  expanded?: boolean;
+  onToggle?: () => void;
+  collapsible?: boolean;
+}) {
+  if (!collapsible) {
+    return (
+      <p className="px-2 py-1.5 text-[10px] uppercase tracking-wide text-[var(--text-secondary)] font-medium sticky top-0 bg-[var(--bg-secondary)] z-[1]">
+        {label} · {count}
+      </p>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      className="w-full flex items-center gap-1.5 px-2 py-1.5 text-[10px] uppercase tracking-wide text-[var(--text-secondary)] font-medium sticky top-0 bg-[var(--bg-secondary)] z-[1] hover:text-[var(--text-primary)] transition-colors"
+    >
+      <svg
+        width="10"
+        height="10"
+        viewBox="0 0 10 10"
+        fill="none"
+        className={`shrink-0 transition-transform ${expanded ? "rotate-90" : ""}`}
+      >
+        <path d="M3 2l4 3-4 3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+      {label} · {count}
+    </button>
+  );
+}
+
+function EntryList({
+  entries,
   workspaces,
-  activeWorkspaceId,
+  activeId,
+  generatingIds,
+  onSelect,
+  onDelete,
+}: {
+  entries: ConversationEntry[];
+  workspaces: WorkspaceState[];
+  activeId: string | null;
+  generatingIds: Set<string>;
+  onSelect: (id: string, workspaceId: string) => void;
+  onDelete: (id: string, workspaceId: string) => void;
+}) {
+  return (
+    <>
+      {entries.map((entry) => (
+        <ConversationRow
+          key={entry.conversation.id}
+          entry={entry}
+          workspaceLabel={workspaceName(workspaces, entry.workspaceId)}
+          isActive={entry.conversation.id === activeId}
+          isGenerating={generatingIds.has(entry.conversation.id)}
+          onSelect={() => onSelect(entry.conversation.id, entry.workspaceId)}
+          onDelete={() => onDelete(entry.conversation.id, entry.workspaceId)}
+        />
+      ))}
+    </>
+  );
+}
+
+export default function Sidebar({
+  entries,
+  workspaces,
+  workspaceFilter,
   activeId,
   generatingIds,
   onSelect,
@@ -43,32 +201,71 @@ export default function Sidebar({
   onDelete,
   onAddWorkspace,
   onRemoveWorkspace,
-  onSwitchWorkspace,
+  onSetWorkspaceFilter,
   onOpenSettings,
   onOpenTasks,
   onOpenSkills,
   isOpen,
   onClose,
+  defaultEngine,
+  onDefaultEngineChange,
+  engineStatuses,
 }: SidebarProps) {
   const [search, setSearch] = useState("");
-  const [wsDropdownOpen, setWsDropdownOpen] = useState(false);
-
-  const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId) ?? null;
+  const [wsManageOpen, setWsManageOpen] = useState(false);
+  const [newAgentWsOpen, setNewAgentWsOpen] = useState(false);
+  const [historyExpanded, setHistoryExpanded] = useState(false);
 
   const filtered = useMemo(() => {
-    if (!search.trim()) return conversations;
-    const q = search.toLowerCase();
-    return conversations.filter((c) => c.title.toLowerCase().includes(q));
-  }, [conversations, search]);
+    let list = entries;
+    if (workspaceFilter) {
+      list = list.filter((e) => e.workspaceId === workspaceFilter);
+    }
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      list = list.filter(
+        (e) =>
+          e.conversation.title.toLowerCase().includes(q) ||
+          workspaceName(workspaces, e.workspaceId).toLowerCase().includes(q),
+      );
+    }
+    return list;
+  }, [entries, workspaceFilter, search, workspaces]);
+
+  const { activeEntries, historyEntries } = useMemo(() => {
+    const active: ConversationEntry[] = [];
+    const history: ConversationEntry[] = [];
+    for (const entry of filtered) {
+      if (isActiveEntry(entry, generatingIds)) {
+        active.push(entry);
+      } else {
+        history.push(entry);
+      }
+    }
+    return {
+      activeEntries: sortEntries(active, generatingIds),
+      historyEntries: sortEntries(history, generatingIds),
+    };
+  }, [filtered, generatingIds]);
+
+  const activeInHistory = useMemo(
+    () => !!activeId && historyEntries.some((e) => e.conversation.id === activeId),
+    [activeId, historyEntries],
+  );
+
+  useEffect(() => {
+    if (activeInHistory) setHistoryExpanded(true);
+  }, [activeInHistory]);
+
+  const isSearching = search.trim().length > 0;
+  const newAgentTargetWs = workspaceFilter ?? workspaces[0]?.id ?? null;
 
   return (
     <>
-      {/* Mobile overlay */}
       {isOpen && (
         <div className="fixed inset-0 bg-black/50 z-30 lg:hidden" onClick={onClose} />
       )}
 
-      {/* Sidebar panel */}
       <aside
         className={`
           fixed top-0 left-0 z-40 h-full w-[280px] bg-[var(--bg-secondary)] border-r border-[var(--border-color)]
@@ -78,53 +275,53 @@ export default function Sidebar({
           ${isOpen ? "flex translate-x-0 sidebar-enter" : "hidden"}
         `}
       >
-        {/* Workspace selector */}
-        <div className="px-3 py-2 border-b border-[var(--border-color)]">
+        {/* Header: title + workspace management */}
+        <div className="px-3 py-2.5 border-b border-[var(--border-color)] flex items-center justify-between gap-2">
+          <span className="text-sm font-semibold text-[var(--text-primary)]">Agents</span>
           <div className="relative">
             <button
-              onClick={() => setWsDropdownOpen(!wsDropdownOpen)}
-              className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-[var(--bg-tertiary)] hover:opacity-90 text-[var(--text-primary)] text-sm transition-colors"
+              onClick={() => setWsManageOpen(!wsManageOpen)}
+              className={`p-1.5 rounded-lg hover:bg-[var(--bg-tertiary)] transition-colors ${
+                wsManageOpen ? "bg-[var(--bg-tertiary)] text-[var(--accent)]" : "text-[var(--text-secondary)]"
+              }`}
+              title="Workspaces"
+              aria-label="Workspaces"
             >
-              <span className="text-base shrink-0">📁</span>
-              <span className="flex-1 truncate text-left">
-                {activeWorkspace?.name ?? "No workspace"}
-              </span>
-              <svg
-                width="12" height="12" viewBox="0 0 12 12" fill="none"
-                className={`transition-transform ${wsDropdownOpen ? "rotate-180" : ""}`}
-              >
-                <path d="M3 5l3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              {/* Stacked folders — manage workspaces */}
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <path
+                  d="M4.5 6.5h7.5a1 1 0 011 1v5a1 1 0 01-1 1H3.5a1 1 0 01-1-1V7.5a1 1 0 011-1H4.5z"
+                  stroke="currentColor"
+                  strokeWidth="1.2"
+                  strokeLinejoin="round"
+                  opacity="0.45"
+                />
+                <path
+                  d="M2.5 3.5A1 1 0 013.5 2.5H5.5L6.5 4H12a1 1 0 011 1v6.5a1 1 0 01-1 1H3.5a1 1 0 01-1-1V3.5z"
+                  stroke="currentColor"
+                  strokeWidth="1.2"
+                  strokeLinejoin="round"
+                />
               </svg>
             </button>
-
-            {wsDropdownOpen && (
+            {wsManageOpen && (
               <>
-                <div className="fixed inset-0 z-10" onClick={() => setWsDropdownOpen(false)} />
-                <div className="absolute top-full left-0 right-0 z-20 mt-1 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg shadow-lg overflow-hidden">
+                <div className="fixed inset-0 z-10" onClick={() => setWsManageOpen(false)} />
+                <div className="absolute top-full right-0 z-20 mt-1 w-56 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg shadow-lg overflow-hidden">
+                  <div className="px-3 py-2 text-[10px] uppercase tracking-wide text-[var(--text-secondary)] border-b border-[var(--border-color)]">
+                    Workspaces
+                  </div>
+                  {workspaces.length === 0 && (
+                    <p className="px-3 py-2 text-xs text-[var(--text-secondary)]">No workspaces yet</p>
+                  )}
                   {workspaces.map((ws) => (
                     <div
                       key={ws.id}
-                      className={`flex items-center gap-2 px-3 py-2 text-sm cursor-pointer transition-colors ${
-                        ws.id === activeWorkspaceId
-                          ? "bg-[var(--accent)]/10 text-[var(--accent)]"
-                          : "text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
-                      }`}
+                      className="flex items-center gap-2 px-3 py-2 text-sm text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] transition-colors"
                     >
-                      <span
-                        className="flex-1 truncate"
-                        onClick={() => {
-                          onSwitchWorkspace(ws.id);
-                          setWsDropdownOpen(false);
-                        }}
-                      >
-                        📁 {ws.name}
-                      </span>
+                      <span className="flex-1 truncate" title={ws.path}>📁 {ws.name}</span>
                       <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onRemoveWorkspace(ws.id);
-                          if (workspaces.length <= 1) setWsDropdownOpen(false);
-                        }}
+                        onClick={() => onRemoveWorkspace(ws.id)}
                         className="shrink-0 p-0.5 rounded hover:bg-red-500/20 text-red-400 transition-colors"
                         title="Remove workspace"
                       >
@@ -135,13 +332,10 @@ export default function Sidebar({
                     </div>
                   ))}
                   <button
-                    onClick={() => { onAddWorkspace(); setWsDropdownOpen(false); }}
+                    onClick={() => { onAddWorkspace(); setWsManageOpen(false); }}
                     className="w-full flex items-center gap-2 px-3 py-2 text-sm text-[var(--accent)] hover:bg-[var(--bg-tertiary)] transition-colors border-t border-[var(--border-color)]"
                   >
-                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                      <path d="M7 1v12M1 7h12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-                    </svg>
-                    Add workspace
+                    Add workspace…
                   </button>
                 </div>
               </>
@@ -149,77 +343,178 @@ export default function Sidebar({
           </div>
         </div>
 
+        {/* Workspace filter chips */}
+        {workspaces.length > 0 && (
+          <div className="px-3 py-2 flex gap-1.5 overflow-x-auto scrollbar-none border-b border-[var(--border-color)]">
+            <button
+              onClick={() => onSetWorkspaceFilter(null)}
+              className={`shrink-0 px-2.5 py-1 rounded-full text-[11px] font-medium transition-colors ${
+                workspaceFilter === null
+                  ? "bg-[var(--accent)] text-white"
+                  : "bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+              }`}
+            >
+              All
+            </button>
+            {workspaces.map((ws) => (
+              <button
+                key={ws.id}
+                onClick={() => onSetWorkspaceFilter(ws.id)}
+                className={`shrink-0 px-2.5 py-1 rounded-full text-[11px] font-medium transition-colors max-w-[120px] truncate ${
+                  workspaceFilter === ws.id
+                    ? "bg-[var(--accent)] text-white"
+                    : "bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                }`}
+                title={ws.path}
+              >
+                {ws.name}
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* Search */}
-        <div className="px-3 py-2">
+        <div className="px-3 py-2 border-b border-[var(--border-color)]">
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search conversations..."
+            placeholder="Search agents…"
             className="w-full bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg px-3 py-1.5 text-xs text-[var(--text-primary)] placeholder-[var(--text-secondary)] outline-none focus:border-[var(--accent)] transition-colors"
           />
         </div>
 
-        {/* Conversation list */}
+        {/* Conversation list: Active + collapsible History */}
         <div className="flex-1 overflow-y-auto px-2 py-1">
           {filtered.length === 0 && (
-            <p className="text-xs text-[var(--text-secondary)] text-center mt-8">
-              {search ? "No matching conversations" : activeWorkspace ? "No conversations yet" : "Add a workspace to start"}
+            <p className="text-xs text-[var(--text-secondary)] text-center mt-8 px-2">
+              {search
+                ? "No matching agents"
+                : workspaces.length === 0
+                  ? "Add a workspace to start"
+                  : "No agents yet — create one below"}
             </p>
           )}
-          {filtered.map((conv) => (
-            <div
-              key={conv.id}
-              onClick={() => onSelect(conv.id)}
-              className={`
-                group flex items-center gap-2 px-3 py-2.5 rounded-lg cursor-pointer mb-0.5
-                transition-colors
-                ${
-                  conv.id === activeId
-                    ? "bg-[var(--bg-tertiary)] text-[var(--text-primary)]"
-                    : "text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40"
-                }
-              `}
-            >
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-1.5">
-                  {generatingIds.has(conv.id) && (
-                    <span className="shrink-0 w-2 h-2 rounded-full bg-green-400 animate-pulse" title="Generating..." />
-                  )}
-                  <p className="text-sm truncate leading-tight">{conv.title}</p>
+
+          {isSearching ? (
+            <EntryList
+              entries={sortEntries(filtered, generatingIds)}
+              workspaces={workspaces}
+              activeId={activeId}
+              generatingIds={generatingIds}
+              onSelect={onSelect}
+              onDelete={onDelete}
+            />
+          ) : (
+            <>
+              {activeEntries.length > 0 && (
+                <div className="mb-2">
+                  <SectionHeader label="Active" count={activeEntries.length} />
+                  <EntryList
+                    entries={activeEntries}
+                    workspaces={workspaces}
+                    activeId={activeId}
+                    generatingIds={generatingIds}
+                    onSelect={onSelect}
+                    onDelete={onDelete}
+                  />
                 </div>
-                <p className="text-[10px] mt-0.5 opacity-60">
-                  {relativeTime(conv.updatedAt)}
-                </p>
-              </div>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onDelete(conv.id);
-                }}
-                className="opacity-0 group-hover:opacity-100 shrink-0 p-1 rounded hover:bg-red-500/20 text-red-400 transition-opacity"
-                title="Delete conversation"
-              >
-                <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
-                  <path d="M4.5 2h5a.5.5 0 010 1h-5a.5.5 0 010-1zM3 4h8l-.7 8.4a1 1 0 01-1 .9H4.7a1 1 0 01-1-.9L3 4zm2.5 2v5M7 6v5M8.5 6v5" stroke="currentColor" strokeWidth="1" fill="none" strokeLinecap="round" />
-                </svg>
-              </button>
-            </div>
-          ))}
+              )}
+
+              {historyEntries.length > 0 && (
+                <div>
+                  <SectionHeader
+                    label="History"
+                    count={historyEntries.length}
+                    collapsible
+                    expanded={historyExpanded}
+                    onToggle={() => setHistoryExpanded((v) => !v)}
+                  />
+                  {historyExpanded && (
+                    <EntryList
+                      entries={historyEntries}
+                      workspaces={workspaces}
+                      activeId={activeId}
+                      generatingIds={generatingIds}
+                      onSelect={onSelect}
+                      onDelete={onDelete}
+                    />
+                  )}
+                </div>
+              )}
+            </>
+          )}
         </div>
 
-        {/* Bottom bar: New Agent / Scheduled Tasks / Skills / Settings */}
+        {/* Bottom bar */}
         <div className="px-3 py-2 border-t border-[var(--border-color)] space-y-1.5">
-          <button
-            onClick={onNew}
-            disabled={!activeWorkspaceId}
-            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-medium transition-colors"
-          >
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
-              <path d="M7 1v12M1 7h12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" fill="none" />
-            </svg>
-            New Agent
-          </button>
+          <div className="flex items-center gap-2">
+            <label className="text-[10px] text-[var(--text-secondary)] shrink-0">Engine</label>
+            <select
+              value={defaultEngine}
+              onChange={(e) => onDefaultEngineChange(e.target.value as AgentEngineId)}
+              className="flex-1 min-w-0 text-xs rounded-lg px-2 py-1.5 bg-[var(--bg-primary)] border border-[var(--border-color)] text-[var(--text-primary)]"
+              title="Default engine for new sessions"
+            >
+              {AGENT_ENGINES.map((e) => {
+                const status = engineStatuses.find((s) => s.id === e.id);
+                const suffix = status?.available ? "" : " (unavailable)";
+                return (
+                  <option key={e.id} value={e.id}>
+                    {e.label}{suffix}
+                  </option>
+                );
+              })}
+            </select>
+          </div>
+          <div className="relative flex gap-1">
+            <button
+              onClick={() => onNew(newAgentTargetWs ?? undefined)}
+              disabled={workspaces.length === 0}
+              className="flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-medium transition-colors"
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
+                <path d="M7 1v12M1 7h12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" fill="none" />
+              </svg>
+              New Agent
+              {newAgentTargetWs && workspaces.length > 1 && (
+                <span className="opacity-70 font-normal">
+                  in {workspaceName(workspaces, newAgentTargetWs)}
+                </span>
+              )}
+            </button>
+            {workspaces.length > 1 && (
+              <button
+                onClick={() => setNewAgentWsOpen(!newAgentWsOpen)}
+                disabled={workspaces.length === 0}
+                className="px-2 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-40 text-white transition-colors"
+                title="New agent in another workspace"
+              >
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                  <path d="M3 5l3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+            )}
+            {newAgentWsOpen && workspaces.length > 1 && (
+              <>
+                <div className="fixed inset-0 z-10" onClick={() => setNewAgentWsOpen(false)} />
+                <div className="absolute bottom-full right-3 left-3 z-20 mb-1 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg shadow-lg overflow-hidden">
+                  {workspaces.map((ws) => (
+                    <button
+                      key={ws.id}
+                      onClick={() => {
+                        onNew(ws.id);
+                        setNewAgentWsOpen(false);
+                      }}
+                      className="w-full text-left px-3 py-2 text-xs text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] transition-colors truncate"
+                    >
+                      📁 {ws.name}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
           <button
             onClick={onOpenTasks}
             className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] text-xs transition-colors"
@@ -234,7 +529,6 @@ export default function Sidebar({
             onClick={onOpenSkills}
             className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] text-xs transition-colors"
           >
-            {/* Sparkles icon */}
             <svg
               width="14"
               height="14"
