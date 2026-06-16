@@ -1,4 +1,5 @@
 pub mod claude;
+pub mod codebuddy;
 pub mod cursor;
 mod shared;
 
@@ -10,7 +11,9 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::Mutex;
 
-pub use shared::{set_engine_model_config, set_model_config_overrides};
+pub use shared::{
+    set_engine_model_config, set_model_config_overrides, truncate_text, MAX_TOOL_RESULT_CHARS,
+};
 
 /// Registered agent engine identifiers.
 ///
@@ -18,12 +21,13 @@ pub use shared::{set_engine_model_config, set_model_config_overrides};
 /// 1. Add its id here and in `engine_display_name`.
 /// 2. Create `engine/<name>.rs` with `check_available`, `spawn_*`, `parse_line`.
 /// 3. Wire dispatch in `check_engine`, `spawn_single`, `spawn_continue`, `parse_line`.
-pub const ENGINE_IDS: &[&str] = &["claude", "cursor"];
+pub const ENGINE_IDS: &[&str] = &["claude", "cursor", "codebuddy"];
 
 pub fn normalize_engine_id(id: &str) -> Result<&'static str> {
     match id {
         "claude" => Ok("claude"),
         "cursor" => Ok("cursor"),
+        "codebuddy" => Ok("codebuddy"),
         other => anyhow::bail!("unknown engine: {other}"),
     }
 }
@@ -32,6 +36,7 @@ pub fn engine_display_name(id: &str) -> &'static str {
     match id {
         "claude" => "Claude Code",
         "cursor" => "Cursor Agent",
+        "codebuddy" => "CodeBuddy",
         _ => "Unknown",
     }
 }
@@ -170,6 +175,7 @@ impl NormalizedEvent {
 pub fn parse_line(engine_id: &str, line: &str) -> Vec<NormalizedEvent> {
     match engine_id {
         "claude" => claude::parse_line(line),
+        "codebuddy" => codebuddy::parse_line(line),
         "cursor" => cursor::parse_line(line),
         _ => vec![],
     }
@@ -179,6 +185,7 @@ pub async fn check_engine(id: &str) -> EngineStatus {
     let display_name = engine_display_name(id).to_string();
     match id {
         "claude" => claude::check_available().await,
+        "codebuddy" => codebuddy::check_available().await,
         "cursor" => cursor::check_available().await,
         _ => EngineStatus {
             id: id.to_string(),
@@ -207,6 +214,7 @@ pub async fn spawn_single(
 ) -> Result<Child> {
     match engine_id {
         "claude" => claude::spawn_single(session_id, message, cwd).await,
+        "codebuddy" => codebuddy::spawn_single(session_id, message, cwd).await,
         "cursor" => cursor::spawn_single(session_id, message, cwd).await,
         other => anyhow::bail!("unknown engine: {other}"),
     }
@@ -220,6 +228,7 @@ pub async fn spawn_continue(
 ) -> Result<Child> {
     match engine_id {
         "claude" => claude::spawn_continue(session_id, message, cwd).await,
+        "codebuddy" => codebuddy::spawn_continue(session_id, message, cwd).await,
         "cursor" => cursor::spawn_continue(session_id, message, cwd).await,
         other => anyhow::bail!("unknown engine: {other}"),
     }
@@ -238,39 +247,22 @@ impl AgentProcess {
         Self { child: None }
     }
 
+    #[allow(dead_code)]
     pub fn set_child(&mut self, child: Child) {
         self.child = Some(child);
     }
 
+    #[allow(dead_code)]
     pub async fn read_stream<F>(
         &mut self,
         engine_id: &str,
-        mut on_events: F,
+        on_events: F,
     ) -> Result<String>
     where
         F: FnMut(&[NormalizedEvent]),
     {
         let child = self.child.take().context("no running agent process")?;
-        let stdout = child.stdout.context("stdout not captured")?;
-
-        let reader = BufReader::new(stdout);
-        let mut lines = reader.lines();
-        let mut final_text = String::new();
-
-        while let Some(line) = lines.next_line().await? {
-            let events = parse_line(engine_id, &line);
-            if events.is_empty() {
-                continue;
-            }
-            for evt in &events {
-                if let Some(text) = evt.final_text() {
-                    final_text = text;
-                }
-            }
-            on_events(&events);
-        }
-
-        Ok(final_text)
+        read_child_stream(engine_id, child, on_events).await
     }
 
     pub async fn kill(&mut self) {
@@ -281,9 +273,46 @@ impl AgentProcess {
         self.child = None;
     }
 
+    #[allow(dead_code)]
     pub fn child_pid(&self) -> Option<u32> {
         self.child.as_ref().and_then(|c| c.id())
     }
+}
+
+/// Read NDJSON from a child process stdout until EOF, then wait for exit.
+/// Callers should not hold per-conversation locks while this runs.
+pub async fn read_child_stream<F>(
+    engine_id: &str,
+    mut child: Child,
+    mut on_events: F,
+) -> Result<String>
+where
+    F: FnMut(&[NormalizedEvent]),
+{
+    let stdout = child.stdout.take().context("stdout not captured")?;
+
+    let reader = BufReader::new(stdout);
+    let mut lines = reader.lines();
+    let mut final_text = String::new();
+
+    while let Some(line) = lines.next_line().await? {
+        if shared::is_ignorable_stream_line(&line) {
+            continue;
+        }
+        let events = parse_line(engine_id, &line);
+        if events.is_empty() {
+            continue;
+        }
+        for evt in &events {
+            if let NormalizedEvent::Final { text } = evt {
+                final_text = text.clone();
+            }
+        }
+        on_events(&events);
+    }
+
+    let _ = child.wait().await;
+    Ok(final_text)
 }
 
 pub type SharedAgentProcess = Arc<Mutex<AgentProcess>>;
@@ -306,7 +335,7 @@ pub async fn resolve_session_id(
     conversation_id: &str,
     engine_id: &str,
 ) -> String {
-    if engine_id == "claude" {
+    if engine_id == "claude" || engine_id == "codebuddy" {
         return conversation_id.to_string();
     }
     let guard = map.lock().await;
@@ -322,7 +351,7 @@ pub async fn remember_session_id(
     engine_id: &str,
     session_id: &str,
 ) {
-    if engine_id == "claude" {
+    if engine_id == "claude" || engine_id == "codebuddy" {
         return;
     }
     let mut guard = map.lock().await;

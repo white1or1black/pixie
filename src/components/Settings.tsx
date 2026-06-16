@@ -41,6 +41,7 @@ export default function Settings({
   const [expandedEngines, setExpandedEngines] = useState<Record<AgentEngineId, boolean>>({
     claude: false,
     cursor: false,
+    codebuddy: false,
   });
   const updater = useUpdater();
   const [appVersion, setAppVersion] = useState("");

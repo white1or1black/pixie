@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo, startTransition } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
@@ -89,6 +89,148 @@ function patchConversation(
   };
 }
 
+/** Coalesce high-frequency stream events before touching React state. */
+interface StreamBatch {
+  textParts: { content: string; eventType: string }[];
+  tools: ResponseTool[];
+  thinkingTokens?: number;
+  thinkingText?: string;
+  usage?: ResponseUsage;
+}
+
+function appendStreamingText(current: string, content: string, eventType: string): string {
+  if (!content) return current;
+  if (eventType === "delta" || eventType === "block_start") {
+    return current + content;
+  }
+  if (eventType === "assistant") {
+    if (!current) return content;
+    if (content.startsWith(current) || content === current) return content;
+    if (current.endsWith(content)) return current;
+    return `${current}\n\n${content}`;
+  }
+  return current + content;
+}
+
+function applyToolEvent(tools: ToolStep[], tool: ResponseTool): ToolStep[] {
+  const next = [...tools];
+  if (tool.kind === "start") {
+    if (next.some((t) => t.id === tool.tool_use_id)) return next;
+    let parsedInput: unknown;
+    try {
+      parsedInput = tool.input ? JSON.parse(tool.input) : undefined;
+    } catch {
+      parsedInput = undefined;
+    }
+    next.push({
+      id: tool.tool_use_id,
+      name: tool.name ?? "tool",
+      status: "running",
+      input: parsedInput,
+      rawInput: tool.input,
+    });
+    return next;
+  }
+
+  const idx = next.findIndex((t) => t.id === tool.tool_use_id);
+  const status = tool.is_error ? "error" : "done";
+  if (idx >= 0) {
+    next[idx] = { ...next[idx], status, result: tool.content };
+  } else {
+    next.push({
+      id: tool.tool_use_id,
+      name: tool.name ?? "tool",
+      status,
+      result: tool.content,
+    });
+  }
+  return next;
+}
+
+function applyUsage(last: Message, usageEvent: ResponseUsage): MessageUsage {
+  if (usageEvent.kind === "final") {
+    return {
+      inputTokens: usageEvent.input_tokens,
+      outputTokens: usageEvent.output_tokens,
+      cacheReadTokens: usageEvent.cache_read_tokens,
+      cacheCreationTokens: usageEvent.cache_creation_tokens,
+      costUsd: usageEvent.cost_usd,
+      durationMs: usageEvent.duration_ms,
+      numTurns: usageEvent.num_turns,
+      model: usageEvent.model,
+      stopReason: usageEvent.stop_reason,
+      live: false,
+    };
+  }
+  const prevUsage = last.usage ?? {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+  };
+  return {
+    inputTokens: prevUsage.inputTokens + usageEvent.input_tokens,
+    outputTokens: prevUsage.outputTokens + usageEvent.output_tokens,
+    cacheReadTokens: prevUsage.cacheReadTokens + usageEvent.cache_read_tokens,
+    cacheCreationTokens: prevUsage.cacheCreationTokens + usageEvent.cache_creation_tokens,
+    live: true,
+  };
+}
+
+function applyStreamBatch(
+  prev: Record<string, Conversation[]>,
+  convId: string,
+  batch: StreamBatch,
+): Record<string, Conversation[]> {
+  return patchConversation(prev, convId, (conv) => {
+    const msgs = [...conv.messages];
+    const last = msgs[msgs.length - 1];
+    if (!last || last.role !== "assistant") return conv;
+
+    let updated: Message = { ...last };
+
+    for (const { content, eventType } of batch.textParts) {
+      if (updated.status === "streaming") {
+        updated = {
+          ...updated,
+          content: appendStreamingText(updated.content, content, eventType),
+        };
+      }
+    }
+
+    if (batch.tools.length > 0) {
+      let tools = [...(updated.tools ?? [])];
+      for (const tool of batch.tools) {
+        tools = applyToolEvent(tools, tool);
+      }
+      updated = { ...updated, tools };
+    }
+
+    if (batch.thinkingTokens !== undefined) {
+      updated = { ...updated, thinkingTokens: batch.thinkingTokens };
+    }
+
+    if (batch.thinkingText) {
+      const prevText = updated.thinking ?? "";
+      updated = {
+        ...updated,
+        thinking: prevText ? `${prevText}\n\n${batch.thinkingText}` : batch.thinkingText,
+      };
+    }
+
+    if (batch.usage) {
+      updated = { ...updated, usage: applyUsage(updated, batch.usage) };
+    }
+
+    msgs[msgs.length - 1] = updated;
+    return { ...conv, messages: msgs, updatedAt: Date.now() };
+  });
+}
+
+function emptyStreamBatch(): StreamBatch {
+  return { textParts: [], tools: [] };
+}
+
 function flattenConversations(all: Record<string, Conversation[]>): ConversationEntry[] {
   const entries: ConversationEntry[] = [];
   for (const [workspaceId, convs] of Object.entries(all)) {
@@ -141,7 +283,10 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
   const [engineStatuses, setEngineStatuses] = useState<EngineStatus[] | null>(null);
   const [defaultEngine, setDefaultEngine] = useState<AgentEngineId>(() => {
     const stored = localStorage.getItem(DEFAULT_ENGINE_KEY);
-    return stored === "cursor" ? "cursor" : "claude";
+    if (stored === "cursor" || stored === "codebuddy" || stored === "claude") {
+      return stored;
+    }
+    return "claude";
   });
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -149,6 +294,82 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
   const unlistenRefs = useRef<Array<() => void>>([]);
   const activeIdRef = useRef<string | null>(activeId);
   const allConversationsRef = useRef(allConversations);
+  const streamBatchesRef = useRef(new Map<string, StreamBatch>());
+  const streamFlushScheduledRef = useRef(false);
+  // Timestamp of the last streamed UI flush, for rate-limiting (see below).
+  const lastStreamFlushAtRef = useRef(0);
+  // Cap streamed UI updates to ~20fps. Each flush rebuilds the conversation
+  // tree and re-renders the sidebar/memos + reflows the growing reply; running
+  // that on every animation frame (60fps) saturates the main thread once a
+  // session has history, freezing the UI. Text is perfectly readable at 20fps.
+  // The terminal agent-done/agent-error flush bypasses this (immediate).
+  const STREAM_FLUSH_MIN_MS = 50;
+  const saveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestPersistRef = useRef<{
+    workspaces: WorkspaceState[];
+    activeWorkspaceId: string | null;
+    allConversations: Record<string, Conversation[]>;
+  } | null>(null);
+
+  const flushStreamBatches = useCallback((onlyConvId?: string) => {
+    const pending = streamBatchesRef.current;
+    if (pending.size === 0) return;
+
+    const toFlush = onlyConvId
+      ? (() => {
+          const batch = pending.get(onlyConvId);
+          if (!batch) return null;
+          pending.delete(onlyConvId);
+          return new Map([[onlyConvId, batch] as const]);
+        })()
+      : (() => {
+          const all = new Map(pending);
+          pending.clear();
+          return all;
+        })();
+
+    if (!toFlush || toFlush.size === 0) return;
+
+    startTransition(() => {
+      setAllConversations((prev) => {
+        let next = prev;
+        for (const [convId, batch] of toFlush) {
+          next = applyStreamBatch(next, convId, batch);
+        }
+        return next;
+      });
+    });
+  }, []);
+
+  const scheduleStreamFlush = useCallback(() => {
+    if (streamFlushScheduledRef.current) return;
+    streamFlushScheduledRef.current = true;
+    const tick = () => {
+      if (performance.now() - lastStreamFlushAtRef.current < STREAM_FLUSH_MIN_MS) {
+        // Too soon since the last flush — wait one more frame to keep the
+        // update rate capped, giving the main thread room to stay responsive.
+        requestAnimationFrame(tick);
+        return;
+      }
+      streamFlushScheduledRef.current = false;
+      lastStreamFlushAtRef.current = performance.now();
+      flushStreamBatches();
+    };
+    requestAnimationFrame(tick);
+  }, [flushStreamBatches]);
+
+  const queueStreamUpdate = useCallback(
+    (convId: string, mutate: (batch: StreamBatch) => void) => {
+      let batch = streamBatchesRef.current.get(convId);
+      if (!batch) {
+        batch = emptyStreamBatch();
+        streamBatchesRef.current.set(convId, batch);
+      }
+      mutate(batch);
+      scheduleStreamFlush();
+    },
+    [scheduleStreamFlush],
+  );
 
   useEffect(() => {
     activeIdRef.current = activeId;
@@ -231,10 +452,40 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
     setLoaded(true);
   }, []);
 
+  // Persist to localStorage. During agent streaming, allConversations updates
+  // ~60×/s; synchronous JSON.stringify of the full history blocks the main thread
+  // and freezes the UI (especially with CodeBuddy's high event rate). Debounce
+  // while generating; save immediately once idle.
   useEffect(() => {
     if (!loaded) return;
-    saveData(workspaces, activeWorkspaceId, allConversations);
-  }, [loaded, workspaces, activeWorkspaceId, allConversations]);
+
+    latestPersistRef.current = { workspaces, activeWorkspaceId, allConversations };
+
+    if (saveDebounceRef.current) {
+      clearTimeout(saveDebounceRef.current);
+      saveDebounceRef.current = null;
+    }
+
+    const persist = () => {
+      const snap = latestPersistRef.current;
+      if (snap) {
+        saveData(snap.workspaces, snap.activeWorkspaceId, snap.allConversations);
+      }
+    };
+
+    if (generatingIds.size > 0) {
+      saveDebounceRef.current = setTimeout(persist, 2000);
+    } else {
+      persist();
+    }
+
+    return () => {
+      if (saveDebounceRef.current) {
+        clearTimeout(saveDebounceRef.current);
+        saveDebounceRef.current = null;
+      }
+    };
+  }, [loaded, workspaces, activeWorkspaceId, allConversations, generatingIds]);
 
   useEffect(() => {
     if (activeWorkspace?.path) {
@@ -263,21 +514,15 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
 
     async function setup() {
       const u1 = await listen<ResponseChunk>("agent-response", (event) => {
-        const { conversation_id, content } = event.payload;
-        setAllConversations((prev) =>
-          patchConversation(prev, conversation_id, (conv) => {
-            const msgs = [...conv.messages];
-            const last = msgs[msgs.length - 1];
-            if (last && last.role === "assistant" && last.status === "streaming") {
-              msgs[msgs.length - 1] = { ...last, content: last.content + content };
-            }
-            return { ...conv, messages: msgs, updatedAt: Date.now() };
-          }),
-        );
+        const { conversation_id, content, event_type } = event.payload;
+        queueStreamUpdate(conversation_id, (batch) => {
+          batch.textParts.push({ content, eventType: event_type });
+        });
       });
 
       const u2 = await listen<ResponseDone>("agent-done", (event) => {
         const done = event.payload;
+        flushStreamBatches(done.conversation_id);
         setAllConversations((prev) =>
           patchConversation(prev, done.conversation_id, (conv) => {
             const msgs = [...conv.messages];
@@ -293,11 +538,13 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
           next.delete(done.conversation_id);
           return next;
         });
+        // Only clear the banner when the turn actually succeeded.
         setError(null);
       });
 
       const u3 = await listen<ResponseError>("agent-error", (event) => {
         const err = event.payload;
+        flushStreamBatches(err.conversation_id);
         setError(err.error);
         setAllConversations((prev) =>
           patchConversation(prev, err.conversation_id, (conv) => {
@@ -318,121 +565,32 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
 
       const u4 = await listen<ResponseTool>("agent-tool", (event) => {
         const tool = event.payload;
-        setAllConversations((prev) =>
-          patchConversation(prev, tool.conversation_id, (conv) => {
-            const msgs = [...conv.messages];
-            const last = msgs[msgs.length - 1];
-            if (!last || last.role !== "assistant") return conv;
-            const tools: ToolStep[] = [...(last.tools ?? [])];
-
-            if (tool.kind === "start") {
-              if (!tools.some((t) => t.id === tool.tool_use_id)) {
-                let parsedInput: unknown;
-                try {
-                  parsedInput = tool.input ? JSON.parse(tool.input) : undefined;
-                } catch {
-                  parsedInput = undefined;
-                }
-                tools.push({
-                  id: tool.tool_use_id,
-                  name: tool.name ?? "tool",
-                  status: "running",
-                  input: parsedInput,
-                  rawInput: tool.input,
-                });
-              }
-            } else {
-              const idx = tools.findIndex((t) => t.id === tool.tool_use_id);
-              const status = tool.is_error ? "error" : "done";
-              if (idx >= 0) {
-                tools[idx] = { ...tools[idx], status, result: tool.content };
-              } else {
-                tools.push({
-                  id: tool.tool_use_id,
-                  name: tool.name ?? "tool",
-                  status,
-                  result: tool.content,
-                });
-              }
-            }
-
-            msgs[msgs.length - 1] = { ...last, tools };
-            return { ...conv, messages: msgs, updatedAt: Date.now() };
-          }),
-        );
+        queueStreamUpdate(tool.conversation_id, (batch) => {
+          batch.tools.push(tool);
+        });
       });
 
       const u5 = await listen<ResponseThinking>("agent-thinking", (event) => {
         const { conversation_id, tokens } = event.payload;
-        setAllConversations((prev) =>
-          patchConversation(prev, conversation_id, (conv) => {
-            const msgs = [...conv.messages];
-            const last = msgs[msgs.length - 1];
-            if (!last || last.role !== "assistant") return conv;
-            msgs[msgs.length - 1] = { ...last, thinkingTokens: tokens };
-            return { ...conv, messages: msgs, updatedAt: Date.now() };
-          }),
-        );
+        queueStreamUpdate(conversation_id, (batch) => {
+          batch.thinkingTokens = tokens;
+        });
       });
 
       const u6 = await listen<ResponseUsage>("agent-usage", (event) => {
         const u = event.payload;
-        setAllConversations((prev) =>
-          patchConversation(prev, u.conversation_id, (conv) => {
-            const msgs = [...conv.messages];
-            const last = msgs[msgs.length - 1];
-            if (!last || last.role !== "assistant") return conv;
-
-            let usage: MessageUsage;
-            if (u.kind === "final") {
-              usage = {
-                inputTokens: u.input_tokens,
-                outputTokens: u.output_tokens,
-                cacheReadTokens: u.cache_read_tokens,
-                cacheCreationTokens: u.cache_creation_tokens,
-                costUsd: u.cost_usd,
-                durationMs: u.duration_ms,
-                numTurns: u.num_turns,
-                model: u.model,
-                stopReason: u.stop_reason,
-                live: false,
-              };
-            } else {
-              const prevUsage = last.usage ?? {
-                inputTokens: 0,
-                outputTokens: 0,
-                cacheReadTokens: 0,
-                cacheCreationTokens: 0,
-              };
-              usage = {
-                inputTokens: prevUsage.inputTokens + u.input_tokens,
-                outputTokens: prevUsage.outputTokens + u.output_tokens,
-                cacheReadTokens: prevUsage.cacheReadTokens + u.cache_read_tokens,
-                cacheCreationTokens: prevUsage.cacheCreationTokens + u.cache_creation_tokens,
-                live: true,
-              };
-            }
-            msgs[msgs.length - 1] = { ...last, usage };
-            return { ...conv, messages: msgs, updatedAt: Date.now() };
-          }),
-        );
+        queueStreamUpdate(u.conversation_id, (batch) => {
+          batch.usage = u;
+        });
       });
 
       const u7 = await listen<ResponseThinkingText>("agent-thinking-text", (event) => {
         const { conversation_id, content } = event.payload;
-        setAllConversations((prev) =>
-          patchConversation(prev, conversation_id, (conv) => {
-            const msgs = [...conv.messages];
-            const last = msgs[msgs.length - 1];
-            if (!last || last.role !== "assistant") return conv;
-            const prevText = last.thinking ?? "";
-            msgs[msgs.length - 1] = {
-              ...last,
-              thinking: prevText ? `${prevText}\n\n${content}` : content,
-            };
-            return { ...conv, messages: msgs, updatedAt: Date.now() };
-          }),
-        );
+        queueStreamUpdate(conversation_id, (batch) => {
+          batch.thinkingText = batch.thinkingText
+            ? `${batch.thinkingText}\n\n${content}`
+            : content;
+        });
       });
 
       if (!mounted) { u1(); u2(); u3(); u4(); u5(); u6(); u7(); return; }
@@ -444,8 +602,10 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
       mounted = false;
       for (const fn of unlistenRefs.current) fn();
       unlistenRefs.current = [];
+      streamBatchesRef.current.clear();
+      streamFlushScheduledRef.current = false;
     };
-  }, []);
+  }, [queueStreamUpdate, flushStreamBatches]);
 
   const resolveTargetWorkspace = useCallback((): string | null => {
     return workspaceFilter ?? activeWorkspaceId ?? sortedWorkspaces[0]?.id ?? null;
@@ -590,8 +750,12 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
 
       const currentConv = allConversationsRef.current[wsId]?.find((c) => c.id === convId);
       const engine = currentConv?.engine ?? defaultEngine;
+      // Only --resume when a prior turn completed successfully on the backend.
+      // Using user-message count alone breaks retries: after a failed first
+      // attempt (spawn error / no CodeBuddy session) we'd pass --resume and get
+      // "No conversation found with session ID".
       const isContinue = currentConv
-        ? currentConv.messages.filter((m) => m.role === "user").length > 0
+        ? currentConv.messages.some((m) => m.role === "assistant" && m.status === "done")
         : false;
 
       // Ensure backend cwd matches the conversation's workspace before spawning.

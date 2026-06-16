@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef, useMemo, type ReactNode } from "react";
+import { memo, useState, useCallback, useEffect, useRef, useMemo, type ReactNode, type ComponentPropsWithoutRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
@@ -367,7 +367,7 @@ function renderToolInput(step: ToolStep, onOpenPreview: (t: PreviewRequest) => v
   return <div className="tool-fields">{rows}</div>;
 }
 
-function ToolStepCard({ step, onOpenPreview }: { step: ToolStep; onOpenPreview: (t: PreviewRequest) => void }) {
+function ToolStepCardImpl({ step, onOpenPreview }: { step: ToolStep; onOpenPreview: (t: PreviewRequest) => void }) {
   // Convention: a running step is expanded (watch it work); once it has a
   // result it auto-collapses to keep the transcript readable. The user can
   // still click any card to expand/collapse manually.
@@ -459,6 +459,8 @@ function ToolStepCard({ step, onOpenPreview }: { step: ToolStep; onOpenPreview: 
     </div>
   );
 }
+
+const ToolStepCard = memo(ToolStepCardImpl);
 
 function ToolActivity({ tools, onOpenPreview }: { tools: ToolStep[]; onOpenPreview: (t: PreviewRequest) => void }) {
   if (!tools || tools.length === 0) return null;
@@ -589,12 +591,76 @@ function UsageStats({ usage }: { usage: MessageUsage }) {
   );
 }
 
-export default function MessageBubble({ message, onOpenPreview }: MessageBubbleProps) {
+function MessageBubbleImpl({ message, onOpenPreview }: MessageBubbleProps) {
   const isUser = message.role === "user";
+  const isStreamingAssistant = !isUser && message.status === "streaming";
   const time = new Date(message.timestamp).toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",
   });
+
+  const markdownComponents = useMemo(
+    () => ({
+      a({ href, children, ...props }: ComponentPropsWithoutRef<"a"> & { href?: string }) {
+        if (typeof href === "string" && /^https?:\/\//i.test(href)) {
+          return (
+            <a
+              href={href}
+              onClick={(e) => {
+                e.preventDefault();
+                onOpenPreview({ kind: "url", url: href });
+              }}
+              className="text-[var(--accent)] hover:underline"
+              {...props}
+            >
+              {children}
+            </a>
+          );
+        }
+        return <a href={href} {...props}>{children}</a>;
+      },
+      code({
+        className,
+        children,
+        ...props
+      }: ComponentPropsWithoutRef<"code"> & { className?: string }) {
+        const match = /language-(\w+)/.exec(className || "");
+        const codeString = String(children).replace(/\n$/, "");
+
+        if (match) {
+          return (
+            <div className="code-block-wrapper">
+              <div className="code-block-header">
+                <span>{match[1]}</span>
+                <CopyButton text={codeString} />
+              </div>
+              <SyntaxHighlighter
+                style={oneDark}
+                language={match[1]}
+                PreTag="div"
+                customStyle={{
+                  margin: 0,
+                  borderRadius: "0 0 8px 8px",
+                  fontSize: "0.85em",
+                  overflowX: "auto",
+                  maxWidth: "100%",
+                }}
+              >
+                {codeString}
+              </SyntaxHighlighter>
+            </div>
+          );
+        }
+
+        return (
+          <code className={className} {...props}>
+            {children}
+          </code>
+        );
+      },
+    }),
+    [onOpenPreview],
+  );
 
   return (
     <div
@@ -621,71 +687,21 @@ export default function MessageBubble({ message, onOpenPreview }: MessageBubbleP
 
             <div
               className={`markdown-body text-sm text-[var(--text-primary)] ${
-                message.status === "streaming" ? "streaming-cursor" : ""
+                isStreamingAssistant ? "streaming-cursor" : ""
               }`}
             >
+            {isStreamingAssistant ? (
+              <p className="whitespace-pre-wrap [overflow-wrap:anywhere] m-0">
+                {message.content || "\u00a0"}
+              </p>
+            ) : (
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
-              components={{
-                a({ href, children, ...props }) {
-                  if (typeof href === "string" && /^https?:\/\//i.test(href)) {
-                    return (
-                      <a
-                        href={href}
-                        onClick={(e) => {
-                          e.preventDefault();
-                          onOpenPreview({ kind: "url", url: href });
-                        }}
-                        className="text-[var(--accent)] hover:underline"
-                        {...props}
-                      >
-                        {children}
-                      </a>
-                    );
-                  }
-                  return <a href={href} {...props}>{children}</a>;
-                },
-                code({ className, children, ...props }) {
-                  const match = /language-(\w+)/.exec(className || "");
-                  const codeString = String(children).replace(/\n$/, "");
-
-                  if (match) {
-                    return (
-                      <div className="code-block-wrapper">
-                        <div className="code-block-header">
-                          <span>{match[1]}</span>
-                          <CopyButton text={codeString} />
-                        </div>
-                        <SyntaxHighlighter
-                          style={oneDark}
-                          language={match[1]}
-                          PreTag="div"
-                          customStyle={{
-                            margin: 0,
-                            borderRadius: "0 0 8px 8px",
-                            fontSize: "0.85em",
-                            // Scroll long lines horizontally inside the bubble
-                            // instead of stretching it past its max width.
-                            overflowX: "auto",
-                            maxWidth: "100%",
-                          }}
-                        >
-                          {codeString}
-                        </SyntaxHighlighter>
-                      </div>
-                    );
-                  }
-
-                  return (
-                    <code className={className} {...props}>
-                      {children}
-                    </code>
-                  );
-                },
-              }}
+              components={markdownComponents}
             >
-              {message.content || " "}
+              {message.content || "\u00a0"}
             </ReactMarkdown>
+            )}
             </div>
           </>
         )}
@@ -707,3 +723,17 @@ export default function MessageBubble({ message, onOpenPreview }: MessageBubbleP
     </div>
   );
 }
+
+/**
+ * Memoized so a streaming flush re-renders only the active (last) message.
+ *
+ * `useChat` rebuilds the whole conversation tree on every stream batch, but
+ * `applyStreamBatch` only creates a new object for the streaming message — every
+ * earlier message keeps its reference, so a shallow memo skips re-running
+ * ReactMarkdown / Prism for the entire history. Without this, a verbose engine
+ * (e.g. CodeBuddy with live deltas, code blocks and many tool steps) re-parses
+ * the whole transcript ~60×/s and freezes the page.
+ */
+const MessageBubble = memo(MessageBubbleImpl);
+
+export default MessageBubble;

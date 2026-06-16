@@ -28,6 +28,7 @@ function loadEngineModelConfigs(): EngineModelConfigs {
       return {
         claude: { ...DEFAULT_ENGINE_MODEL_CONFIGS.claude, ...parsed.claude },
         cursor: { ...DEFAULT_ENGINE_MODEL_CONFIGS.cursor, ...parsed.cursor },
+        codebuddy: { ...DEFAULT_ENGINE_MODEL_CONFIGS.codebuddy, ...parsed.codebuddy },
       };
     }
     const legacy = localStorage.getItem("pixie-model-config");
@@ -35,6 +36,7 @@ function loadEngineModelConfigs(): EngineModelConfigs {
       return {
         claude: { ...DEFAULT_ENGINE_MODEL_CONFIGS.claude, ...JSON.parse(legacy) },
         cursor: { ...DEFAULT_ENGINE_MODEL_CONFIGS.cursor },
+        codebuddy: { ...DEFAULT_ENGINE_MODEL_CONFIGS.codebuddy },
       };
     }
   } catch { /* ignore */ }

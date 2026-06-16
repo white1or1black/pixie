@@ -1,5 +1,7 @@
 # Pixie 发版指南
 
+> **Agent skill:** 在 Pixie 仓库内可用 `/release` 调用 `.claude/skills/release/SKILL.md`,让 agent 按步骤执行发版。
+
 本文档说明如何发布 Pixie 新版本,让已安装的用户通过 app 内 **Settings → Check for Updates** 自动更新到最新版。
 
 ---

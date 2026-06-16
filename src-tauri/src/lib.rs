@@ -3,7 +3,7 @@ mod pty;
 
 use engine::{
     bind_conversation_engine, check_all_engines, conversation_engine_id,
-    init_conversation_engine_map, normalize_engine_id, remember_session_id,
+    init_conversation_engine_map, normalize_engine_id, read_child_stream, remember_session_id,
     resolve_session_id, spawn_continue, spawn_single, AgentProcess, ConversationEngineMap,
     EngineStatus, NormalizedEvent, SharedAgentProcess,
 };
@@ -231,6 +231,22 @@ pub struct SkillEntry {
 // Agent event emission (engine-agnostic)
 // ---------------------------------------------------------------------------
 
+const MAX_TOOL_RESULT_CHARS: usize = engine::MAX_TOOL_RESULT_CHARS;
+
+fn truncate_for_ui(text: &str, max: usize) -> String {
+    engine::truncate_text(text, max)
+}
+
+fn usage_is_empty(u: &engine::UsageInfo) -> bool {
+    u.input_tokens == 0
+        && u.output_tokens == 0
+        && u.cache_read_tokens == 0
+        && u.cache_creation_tokens == 0
+        && u.cost_usd.is_none()
+        && u.duration_ms.is_none()
+        && u.num_turns.is_none()
+}
+
 fn emit_agent_events(
     app: &AppHandle,
     conversation_id: &str,
@@ -269,7 +285,8 @@ fn emit_agent_events(
                     ("start", name.clone(), input.clone(), None, false)
                 }
                 engine::ToolEventKind::Result { content, is_error } => {
-                    ("result", None, None, content.clone(), *is_error)
+                    let truncated = content.as_ref().map(|c| truncate_for_ui(c, MAX_TOOL_RESULT_CHARS));
+                    ("result", None, None, truncated, *is_error)
                 }
             };
             let _ = app.emit(
@@ -300,6 +317,9 @@ fn emit_agent_events(
         }
 
         if let Some(u) = evt.usage() {
+            if u.kind == "turn" && usage_is_empty(u) {
+                continue;
+            }
             let _ = app.emit(
                 "agent-usage",
                 ResponseUsage {
@@ -314,6 +334,16 @@ fn emit_agent_events(
                     num_turns: u.num_turns,
                     model: u.model.clone(),
                     stop_reason: u.stop_reason.clone(),
+                },
+            );
+        }
+
+        if let NormalizedEvent::Error { message } = evt {
+            let _ = app.emit(
+                "agent-error",
+                ResponseError {
+                    conversation_id: conversation_id.to_string(),
+                    error: message.clone(),
                 },
             );
         }
@@ -376,7 +406,6 @@ async fn send_message(
     let session_id =
         resolve_session_id(&state.conversation_engines, &conversation_id, engine_id).await;
 
-    let processes = state.processes.clone();
     let kill_registry = state.kill_registry.clone();
     let conversation_engines = state.conversation_engines.clone();
     let app_handle = app.clone();
@@ -385,16 +414,6 @@ async fn send_message(
     let message_owned = message.clone();
 
     tokio::spawn(async move {
-        let proc_arc = {
-            let processes = processes.lock().await;
-            processes.get(&conv_id).cloned()
-        };
-
-        let Some(proc_arc) = proc_arc else {
-            return;
-        };
-        let mut proc = proc_arc.lock().await;
-
         let spawn_result = if is_continue {
             spawn_continue(
                 &engine_id_owned,
@@ -427,9 +446,8 @@ async fn send_message(
             }
             Ok(child) => child,
         };
-        proc.set_child(child);
 
-        if let Some(pid) = proc.child_pid() {
+        if let Some(pid) = child.id() {
             log::info!("[send_message] registered pid {} for conv {}", pid, conv_id);
             kill_registry.lock().await.insert(conv_id.clone(), pid);
         }
@@ -441,24 +459,32 @@ async fn send_message(
         let engines_after = conversation_engines.clone();
         let engine_for_stream = engine_id_owned.clone();
         let mut last_thinking: u64 = 0;
+        let mut stream_had_error = false;
 
-        let result = proc
-            .read_stream(&engine_for_stream, |events| {
-                for evt in events {
-                    if let Some(sid) = evt.session_id() {
-                        let engines = engines_after.clone();
-                        let conv = conv_id.clone();
-                        let eng = engine_id_owned.clone();
-                        tokio::spawn(async move {
-                            remember_session_id(&engines, &conv, &eng, &sid).await;
-                        });
-                    }
+        let result = read_child_stream(&engine_for_stream, child, |events| {
+            for evt in events {
+                if matches!(evt, NormalizedEvent::Error { .. }) {
+                    stream_had_error = true;
                 }
-                emit_agent_events(&app_handle, &conv_id, events, &mut last_thinking);
-            })
-            .await;
+                if let Some(sid) = evt.session_id() {
+                    let engines = engines_after.clone();
+                    let conv = conv_id.clone();
+                    let eng = engine_id_owned.clone();
+                    tokio::spawn(async move {
+                        remember_session_id(&engines, &conv, &eng, &sid).await;
+                    });
+                }
+            }
+            emit_agent_events(&app_handle, &conv_id, events, &mut last_thinking);
+        })
+        .await;
 
         kill_registry.lock().await.remove(&conv_id_after);
+
+        if stream_had_error {
+            log::info!("[send_message] stream ended with error event for conv {}", conv_id_after);
+            return;
+        }
 
         match result {
             Ok(full_text) => {
@@ -1382,7 +1408,6 @@ async fn run_task_headless(app: AppHandle, task: ScheduledTask, conversation_id:
         return;
     }
 
-    let mut proc = AgentProcess::new();
     let child = match spawn_single(
         "claude",
         &conversation_id,
@@ -1393,41 +1418,39 @@ async fn run_task_headless(app: AppHandle, task: ScheduledTask, conversation_id:
     {
         Ok(child) => child,
         Err(e) => {
-        log::error!("[scheduled] spawn failed for '{}': {}", task.name, e);
-        let _ = app
-            .notification()
-            .builder()
-            .title(&title)
-            .body(format!("Failed to start: {}", e))
-            .show();
-        record_task_run(
-            &app,
-            TaskRunRecord {
-                id: conversation_id.clone(),
-                task_id: task.id.clone(),
-                task_name: task.name.clone(),
-                workspace: task.workspace.clone(),
-                prompt: task.prompt.clone(),
-                result: String::new(),
-                status: "error".into(),
-                started_at: started.to_rfc3339(),
-                finished_at: Utc::now().to_rfc3339(),
-            },
-        );
-        let _ = app.emit(
-            "task-run-complete",
-            serde_json::json!({ "task_id": task.id, "conversation_id": conversation_id, "status": "error" }),
-        );
-        return;
+            log::error!("[scheduled] spawn failed for '{}': {}", task.name, e);
+            let _ = app
+                .notification()
+                .builder()
+                .title(&title)
+                .body(format!("Failed to start: {}", e))
+                .show();
+            record_task_run(
+                &app,
+                TaskRunRecord {
+                    id: conversation_id.clone(),
+                    task_id: task.id.clone(),
+                    task_name: task.name.clone(),
+                    workspace: task.workspace.clone(),
+                    prompt: task.prompt.clone(),
+                    result: String::new(),
+                    status: "error".into(),
+                    started_at: started.to_rfc3339(),
+                    finished_at: Utc::now().to_rfc3339(),
+                },
+            );
+            let _ = app.emit(
+                "task-run-complete",
+                serde_json::json!({ "task_id": task.id, "conversation_id": conversation_id, "status": "error" }),
+            );
+            return;
         }
     };
-
-    proc.set_child(child);
 
     // Read the stream to completion. The on_event closure is intentionally a no-op:
     // we surface scheduled runs via the recorded result + notification rather than
     // streaming into an interactive chat keyed by the same conversation_id.
-    let result = proc.read_stream("claude", |_events| {}).await;
+    let result = read_child_stream("claude", child, |_events| {}).await;
     let finished = Utc::now();
 
     match result {
