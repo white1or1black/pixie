@@ -1,6 +1,6 @@
 [package]
 name = "pixie"
-version = "0.6.0"
+version = "0.6.1"
 description = "Pixie - AI Chat Desktop App"
 authors = ["white1or1black"]
 license = "MIT"

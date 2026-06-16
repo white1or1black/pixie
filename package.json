@@ -2,7 +2,7 @@
   "name": "pixie",
   "private": true,
   "repository": "https://github.com/white1or1black/pixie.git",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "type": "module",
   "packageManager": "pnpm@11.5.2",
   "scripts": {
