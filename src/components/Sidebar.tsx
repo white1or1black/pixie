@@ -13,6 +13,7 @@ interface SidebarProps {
   onSelect: (id: string, workspaceId: string) => void;
   onNew: (workspaceId?: string) => void;
   onDelete: (id: string, workspaceId: string) => void;
+  onRename: (id: string, newTitle: string) => void;
   onAddWorkspace: () => void;
   onRemoveWorkspace: (id: string) => void;
   onSetWorkspaceFilter: (id: string | null) => void;
@@ -66,6 +67,7 @@ function ConversationRow({
   isGenerating,
   onSelect,
   onDelete,
+  onRename,
 }: {
   entry: ConversationEntry;
   workspaceLabel: string;
@@ -73,12 +75,31 @@ function ConversationRow({
   isGenerating: boolean;
   onSelect: () => void;
   onDelete: () => void;
+  onRename: (newTitle: string) => void;
 }) {
   const { conversation: conv } = entry;
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editValue, setEditValue] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const startEditing = () => {
+    setEditValue(conv.title);
+    setEditing(true);
+    setTimeout(() => inputRef.current?.select(), 0);
+  };
+
+  const commitEdit = () => {
+    const trimmed = editValue.trim();
+    if (trimmed && trimmed !== conv.title) {
+      onRename(trimmed);
+    }
+    setEditing(false);
+  };
+
   return (
     <div
-      onClick={() => { setConfirmDelete(false); onSelect(); }}
+      onClick={() => { setConfirmDelete(false); if (!editing) onSelect(); }}
       className={`
         group flex items-center gap-2 px-3 py-2.5 rounded-lg cursor-pointer mb-0.5
         transition-colors
@@ -94,7 +115,28 @@ function ConversationRow({
           {isGenerating && (
             <span className="shrink-0 w-2 h-2 rounded-full bg-green-400 animate-pulse" title="Generating..." />
           )}
-          <p className="text-sm truncate leading-tight">{conv.title}</p>
+          {editing ? (
+            <input
+              ref={inputRef}
+              type="text"
+              value={editValue}
+              onChange={(e) => setEditValue(e.target.value)}
+              onBlur={commitEdit}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") commitEdit();
+                if (e.key === "Escape") setEditing(false);
+              }}
+              onClick={(e) => e.stopPropagation()}
+              className="flex-1 min-w-0 text-sm bg-[var(--bg-primary)] border border-[var(--accent)] rounded px-1 py-0 text-[var(--text-primary)] outline-none"
+            />
+          ) : (
+            <p
+              className="text-sm truncate leading-tight"
+              onDoubleClick={(e) => { e.stopPropagation(); startEditing(); }}
+            >
+              {conv.title}
+            </p>
+          )}
         </div>
           <p className="text-[10px] mt-0.5 opacity-60 truncate">
           <span className="text-[var(--accent)]/80">{workspaceLabel}</span>
@@ -176,6 +218,7 @@ function EntryList({
   generatingIds,
   onSelect,
   onDelete,
+  onRename,
 }: {
   entries: ConversationEntry[];
   workspaces: WorkspaceState[];
@@ -183,6 +226,7 @@ function EntryList({
   generatingIds: Set<string>;
   onSelect: (id: string, workspaceId: string) => void;
   onDelete: (id: string, workspaceId: string) => void;
+  onRename: (id: string, newTitle: string) => void;
 }) {
   return (
     <>
@@ -195,6 +239,7 @@ function EntryList({
           isGenerating={generatingIds.has(entry.conversation.id)}
           onSelect={() => onSelect(entry.conversation.id, entry.workspaceId)}
           onDelete={() => onDelete(entry.conversation.id, entry.workspaceId)}
+          onRename={(newTitle) => onRename(entry.conversation.id, newTitle)}
         />
       ))}
     </>
@@ -210,6 +255,7 @@ export default function Sidebar({
   onSelect,
   onNew,
   onDelete,
+  onRename,
   onAddWorkspace,
   onRemoveWorkspace,
   onSetWorkspaceFilter,
@@ -437,6 +483,7 @@ export default function Sidebar({
               generatingIds={generatingIds}
               onSelect={onSelect}
               onDelete={onDelete}
+              onRename={onRename}
             />
           ) : (
             <>
@@ -450,6 +497,7 @@ export default function Sidebar({
                     generatingIds={generatingIds}
                     onSelect={onSelect}
                     onDelete={onDelete}
+                    onRename={onRename}
                   />
                 </div>
               )}
@@ -471,6 +519,7 @@ export default function Sidebar({
                       generatingIds={generatingIds}
                       onSelect={onSelect}
                       onDelete={onDelete}
+                      onRename={onRename}
                     />
                   )}
                 </div>

@@ -675,6 +675,23 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
     setError(null);
   }, []);
 
+  const renameConversation = useCallback((id: string, newTitle: string) => {
+    const wsId = findWorkspaceForConversation(allConversationsRef.current, id);
+    if (!wsId) return;
+    setAllConversations((prev) => ({
+      ...prev,
+      [wsId]: (prev[wsId] ?? []).map((c) =>
+        c.id === id ? { ...c, title: newTitle } : c
+      ),
+    }));
+    const conv = (allConversationsRef.current[wsId] ?? []).find((c) => c.id === id);
+    if (conv) {
+      invoke("save_conversation", {
+        conversation: { id: conv.id, title: newTitle, created_at: new Date(conv.createdAt).toISOString(), updated_at: new Date(conv.updatedAt).toISOString() },
+      }).catch(() => {});
+    }
+  }, []);
+
   const deleteConversation = useCallback((id: string, workspaceId?: string) => {
     const wsId =
       workspaceId ?? findWorkspaceForConversation(allConversationsRef.current, id);
@@ -908,6 +925,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
     removeWorkspace,
     createConversation,
     switchConversation,
+    renameConversation,
     deleteConversation,
     sendMessage,
     stopGeneration,
