@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { useDragRegion } from "./hooks/useDragRegion";
 import Sidebar from "./components/Sidebar";
 import ChatView from "./components/ChatView";
 import InputBar from "./components/InputBar";
@@ -103,6 +104,10 @@ function NoEngineAvailable({
 export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [fileExplorerOpen, setFileExplorerOpen] = useState(false);
+  const [headerEditing, setHeaderEditing] = useState(false);
+  const [headerEditValue, setHeaderEditValue] = useState("");
+  const headerEditRef = useRef<HTMLInputElement>(null);
+  const handleDragRegion = useDragRegion();
   // Externally-requested preview target (a path/URL clicked in a chat message).
   const [previewTarget, setPreviewTarget] = useState<PreviewTarget | null>(null);
   // Which full-page view the main column shows. The sidebar buttons switch
@@ -143,6 +148,7 @@ export default function App() {
     removeWorkspace,
     createConversation,
     switchConversation,
+    renameConversation,
     deleteConversation,
     sendMessage,
     stopGeneration,
@@ -161,6 +167,14 @@ export default function App() {
     (value: string) => setDrafts((prev) => ({ ...prev, [draftKey]: value })),
     [draftKey]
   );
+
+  const commitHeaderEdit = useCallback(() => {
+    const trimmed = headerEditValue.trim();
+    if (trimmed && activeConversation && trimmed !== activeConversation.title) {
+      renameConversation(activeConversation.id, trimmed);
+    }
+    setHeaderEditing(false);
+  }, [headerEditValue, activeConversation, renameConversation]);
 
   const {
     tasks: scheduledTasks,
@@ -297,6 +311,7 @@ export default function App() {
         onDefaultEngineChange={setDefaultEngine}
         engineStatuses={engineStatuses}
         onDelete={deleteConversation}
+        onRename={renameConversation}
         onAddWorkspace={addWorkspace}
         onRemoveWorkspace={removeWorkspace}
         onSetWorkspaceFilter={setWorkspaceFilter}
@@ -310,11 +325,12 @@ export default function App() {
       <div className="flex-1 flex flex-col min-w-0">
         {mainView === "chat" && (
           <>
-            {/* Header */}
-            <header className="shrink-0 flex items-center justify-between px-4 py-3 border-b border-[var(--border-color)] bg-[var(--bg-primary)]">
+            {/* Header — drag empty areas to move window */}
+            <header
+              className={`shrink-0 flex items-center justify-between px-4 py-3 border-b border-[var(--border-color)] bg-[var(--bg-primary)] ${navigator.platform?.includes("Mac") && !sidebarOpen ? "pl-20" : ""}`}
+              onMouseDown={handleDragRegion}
+            >
               <div className="flex items-center gap-3">
-                {/* When the sidebar is collapsed, surface a new-session button at the
-                    top-left so users can stay in immersive mode without reopening it. */}
                 {!sidebarOpen && (
                   <button
                     onClick={() => {
@@ -340,9 +356,33 @@ export default function App() {
                   </svg>
                 </button>
                 <div className="min-w-0">
-                  <h1 className="text-sm font-semibold text-[var(--text-primary)] truncate">
-                    {activeConversation?.title ?? "Pixie"}
-                  </h1>
+                  {headerEditing ? (
+                    <input
+                      ref={headerEditRef}
+                      type="text"
+                      value={headerEditValue}
+                      onChange={(e) => setHeaderEditValue(e.target.value)}
+                      onBlur={commitHeaderEdit}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") commitHeaderEdit();
+                        if (e.key === "Escape") setHeaderEditing(false);
+                      }}
+                      className="text-sm font-semibold text-[var(--text-primary)] bg-[var(--bg-primary)] border border-[var(--accent)] rounded px-1 py-0 outline-none w-full"
+                    />
+                  ) : (
+                    <h1
+                      className="text-sm font-semibold text-[var(--text-primary)] truncate"
+                      onDoubleClick={() => {
+                        if (activeConversation) {
+                          setHeaderEditValue(activeConversation.title);
+                          setHeaderEditing(true);
+                          setTimeout(() => headerEditRef.current?.select(), 0);
+                        }
+                      }}
+                    >
+                      {activeConversation?.title ?? "Pixie"}
+                    </h1>
+                  )}
                   {activeWorkspace && (
                     <p className="text-[10px] text-[var(--text-secondary)] truncate" title={activeWorkspace.path}>
                       📁 {activeWorkspace.name}

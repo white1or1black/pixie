@@ -594,10 +594,18 @@ function UsageStats({ usage }: { usage: MessageUsage }) {
 function MessageBubbleImpl({ message, onOpenPreview }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const isStreamingAssistant = !isUser && message.status === "streaming";
-  const time = new Date(message.timestamp).toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  const time = isUser
+    ? new Date(message.timestamp).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : new Date(message.timestamp).toLocaleString([], {
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      });
 
   const markdownComponents = useMemo(
     () => ({
@@ -667,10 +675,10 @@ function MessageBubbleImpl({ message, onOpenPreview }: MessageBubbleProps) {
       className={`message-enter flex ${isUser ? "justify-end" : "justify-start"} mb-4`}
     >
       <div
-        className={`min-w-0 max-w-[80%] overflow-hidden rounded-2xl px-4 py-3 ${
+        className={`min-w-0 overflow-hidden ${
           isUser
-            ? "bg-[var(--bg-user-msg)] rounded-br-sm"
-            : "bg-[var(--bg-assistant-msg)] rounded-bl-sm"
+            ? "max-w-[90%] rounded-2xl px-4 py-3 bg-[var(--bg-user-msg)] rounded-br-sm"
+            : "max-w-full"
         }`}
       >
         {isUser ? (

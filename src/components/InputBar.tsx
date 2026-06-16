@@ -217,7 +217,7 @@ export default function InputBar({
 
   return (
     <div className="border-t border-[var(--border-color)] bg-[var(--bg-primary)] px-4 py-3">
-      <div className="max-w-3xl mx-auto">
+      <div className="max-w-4xl mx-auto w-full">
         <div ref={containerRef} className="relative">
           {dropdownOpen && (
             <SkillsDropdown
