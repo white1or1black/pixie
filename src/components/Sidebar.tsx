@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import type { ConversationEntry } from "../hooks/useChat";
 import type { WorkspaceState, AgentEngineId, EngineStatus } from "../types";
+import { useDragRegion } from "../hooks/useDragRegion";
 import { AGENT_ENGINES } from "../types";
 
 interface SidebarProps {
@@ -225,6 +226,7 @@ export default function Sidebar({
   const [wsPendingRemove, setWsPendingRemove] = useState<string | null>(null);
   const [wsDropdownOpen, setWsDropdownOpen] = useState(false);
   const wsDropdownRef = useRef<HTMLDivElement>(null);
+  const handleDragRegion = useDragRegion();
 
   // Close workspace dropdown on outside clicks
   useEffect(() => {
@@ -316,7 +318,7 @@ export default function Sidebar({
       >
         {/* macOS traffic light drag region */}
         {navigator.platform?.includes("Mac") && (
-          <div className="shrink-0 h-[38px] titlebar-drag" />
+          <div className="shrink-0 h-[38px]" onMouseDown={handleDragRegion} />
         )}
         {/* Workspace filter & management */}
         {workspaces.length > 0 && (

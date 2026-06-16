@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { useDragRegion } from "./hooks/useDragRegion";
 import Sidebar from "./components/Sidebar";
 import ChatView from "./components/ChatView";
 import InputBar from "./components/InputBar";
@@ -103,6 +104,7 @@ function NoEngineAvailable({
 export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [fileExplorerOpen, setFileExplorerOpen] = useState(false);
+  const handleDragRegion = useDragRegion();
   // Externally-requested preview target (a path/URL clicked in a chat message).
   const [previewTarget, setPreviewTarget] = useState<PreviewTarget | null>(null);
   // Which full-page view the main column shows. The sidebar buttons switch
@@ -310,13 +312,12 @@ export default function App() {
       <div className="flex-1 flex flex-col min-w-0">
         {mainView === "chat" && (
           <>
-            {/* Header — also serves as drag region on macOS */}
+            {/* Header — drag empty areas to move window */}
             <header
-              className={`shrink-0 flex items-center justify-between px-4 py-3 border-b border-[var(--border-color)] bg-[var(--bg-primary)] ${navigator.platform?.includes("Mac") && !sidebarOpen ? "titlebar-drag pl-20" : navigator.platform?.includes("Mac") ? "titlebar-drag" : ""}`}
+              className={`shrink-0 flex items-center justify-between px-4 py-3 border-b border-[var(--border-color)] bg-[var(--bg-primary)] ${navigator.platform?.includes("Mac") && !sidebarOpen ? "pl-20" : ""}`}
+              onMouseDown={handleDragRegion}
             >
-              <div className="flex items-center gap-3 titlebar-no-drag">
-                {/* When the sidebar is collapsed, surface a new-session button at the
-                    top-left so users can stay in immersive mode without reopening it. */}
+              <div className="flex items-center gap-3">
                 {!sidebarOpen && (
                   <button
                     onClick={() => {
@@ -360,7 +361,7 @@ export default function App() {
                   )}
                 </div>
               </div>
-              <div className="flex items-center gap-2 titlebar-no-drag">
+              <div className="flex items-center gap-2">
                 <button
                   onClick={() => setFileExplorerOpen((prev) => !prev)}
                   disabled={!activeWorkspace}
