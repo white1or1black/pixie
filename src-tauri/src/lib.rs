@@ -950,6 +950,59 @@ async fn plugin_uninstall(name: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn get_default_workspace_path(app: AppHandle) -> Result<String, String> {
+    // A user-configured override (Settings) wins; otherwise default to ~/.pixie.
+    if let Some(custom) = load_default_workspace_override(&app) {
+        let dir = std::path::Path::new(&custom);
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("failed to create default workspace '{custom}': {e}"))?;
+        return Ok(custom);
+    }
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| "cannot determine home directory".to_string())?;
+    let dir = std::path::Path::new(&home).join(".pixie");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("failed to create ~/.pixie: {e}"))?;
+    Ok(dir.to_string_lossy().to_string())
+}
+
+/// Configure the default working directory from Settings. `None` (or an empty
+/// string) clears the override so the default falls back to `~/.pixie`. The
+/// chosen folder is created if needed so it is usable as an agent CWD. This is
+/// config-only: it does not move or modify existing workspaces.
+#[tauri::command]
+async fn set_default_workspace_path(
+    path: Option<String>,
+    app: AppHandle,
+) -> Result<(), String> {
+    match path {
+        Some(raw) => {
+            let trimmed = raw.trim().to_string();
+            if trimmed.is_empty() {
+                persist_default_workspace_override(&app, &None);
+                return Ok(());
+            }
+            std::fs::create_dir_all(&trimmed)
+                .map_err(|e| format!("cannot use '{trimmed}' as default workspace: {e}"))?;
+            persist_default_workspace_override(&app, &Some(trimmed));
+        }
+        None => {
+            persist_default_workspace_override(&app, &None);
+        }
+    }
+    Ok(())
+}
+
+/// Open a native folder picker and return the chosen path, or `None` if the
+/// user cancelled. Unlike `select_workspace`, it has no side effects.
+#[tauri::command]
+async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    Ok(app.dialog().file().blocking_pick_folder().map(|d| d.to_string()))
+}
+
+#[tauri::command]
 async fn set_active_workspace(
     path: String,
     state: tauri::State<'_, AppState>,
@@ -1203,6 +1256,36 @@ fn load_workspace(app: &AppHandle) -> Option<String> {
         fs::read_to_string(file).ok()
     } else {
         None
+    }
+}
+
+/// The user-configured default working directory override (Settings), or `None`
+/// when unset (fall back to `~/.pixie`). Stored next to `workspace.txt`.
+fn load_default_workspace_override(app: &AppHandle) -> Option<String> {
+    let data_dir = get_data_dir(app).ok()?;
+    let raw = fs::read_to_string(data_dir.join("default_workspace.txt")).ok()?;
+    let trimmed = raw.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+/// Persist (`Some`) or clear (`None`) the default working directory override.
+fn persist_default_workspace_override(app: &AppHandle, path: &Option<String>) {
+    let Ok(data_dir) = get_data_dir(app) else {
+        return;
+    };
+    let _ = fs::create_dir_all(&data_dir);
+    let file = data_dir.join("default_workspace.txt");
+    match path {
+        Some(p) => {
+            let _ = fs::write(file, p);
+        }
+        None => {
+            let _ = fs::remove_file(file);
+        }
     }
 }
 
@@ -1808,6 +1891,9 @@ pub fn run() {
             pty_resize,
             pty_kill,
             stop_generation,
+            get_default_workspace_path,
+            set_default_workspace_path,
+            pick_folder,
             select_workspace,
             pick_files,
             get_workspace,

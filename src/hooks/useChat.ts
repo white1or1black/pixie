@@ -23,6 +23,7 @@ import { AGENT_ENGINES } from "../types";
 
 const DATA_KEY = "pixie-data";
 const DEFAULT_ENGINE_KEY = "pixie-default-engine";
+const DEFAULT_WORKSPACE_NAME = "Default";
 
 function normalizeConversation(conv: Conversation): Conversation {
   return {
@@ -290,6 +291,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
   });
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [defaultWorkspacePath, setDefaultWorkspacePath] = useState<string>("");
 
   const unlistenRefs = useRef<Array<() => void>>([]);
   const activeIdRef = useRef<string | null>(activeId);
@@ -379,7 +381,17 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
     allConversationsRef.current = allConversations;
   }, [allConversations]);
 
-  const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId) ?? null;
+  const activeWorkspace = useMemo(() => {
+    const fromList = workspaces.find((w) => w.id === activeWorkspaceId);
+    if (fromList) return fromList;
+    // Workspace was removed from list but conversations may still reference it;
+    // allow continued chatting as long as the path is still valid.
+    if (activeWorkspaceId) {
+      const path = activeWorkspaceId;
+      return { id: path, path, name: path.split("/").pop() ?? path };
+    }
+    return null;
+  }, [workspaces, activeWorkspaceId]);
 
   const sortedWorkspaces = useMemo(
     () => sortWorkspacesByActivity(workspaces, allConversations, generatingIds),
@@ -428,28 +440,54 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
       const byPath = raw.conversations[w.path] ?? [];
       conversations[w.path] = (byPath.length >= byOld.length ? byPath : byOld).map(normalizeConversation);
     }
-    const legacyActivePath = raw.workspaces.find((w) => w.id === raw.activeWorkspaceId)?.path;
-    const activeWorkspaceId =
-      legacyActivePath ??
-      (raw.activeWorkspaceId && seen.has(raw.activeWorkspaceId) ? raw.activeWorkspaceId : null) ??
-      workspaces[0]?.id ??
-      null;
-
-    setWorkspaces(workspaces);
-    setActiveWorkspaceId(activeWorkspaceId);
-    setAllConversations(conversations);
-
-    const convs = activeWorkspaceId ? (conversations[activeWorkspaceId] ?? []) : [];
-    if (convs.length > 0) {
-      setActiveId(convs[0].id);
-    } else {
-      const flat = flattenConversations(conversations);
-      if (flat.length > 0) {
-        setActiveId(flat[0].conversation.id);
-        setActiveWorkspaceId(flat[0].workspaceId);
+    // Restore orphaned conversations whose workspace was removed from the list
+    // but whose data still exists in storage.
+    for (const [key, convs] of Object.entries(raw.conversations)) {
+      if (seen.has(key)) continue;
+      const normalized = convs.map(normalizeConversation);
+      if (normalized.length > 0) {
+        conversations[key] = normalized;
+        seen.add(key);
       }
     }
-    setLoaded(true);
+
+    // Ensure a default workspace exists so the user can always start a conversation.
+    const ensureDefault = async () => {
+      let configuredDefault = "";
+      try {
+        configuredDefault = await invoke<string>("get_default_workspace_path");
+      } catch { /* ignore */ }
+      setDefaultWorkspacePath(configuredDefault);
+
+      let wsList = workspaces;
+      if (wsList.length === 0 && configuredDefault) {
+        wsList = [{ id: configuredDefault, path: configuredDefault, name: DEFAULT_WORKSPACE_NAME }];
+        conversations[configuredDefault] = conversations[configuredDefault] ?? [];
+      }
+      const legacyActivePath = raw.workspaces.find((w) => w.id === raw.activeWorkspaceId)?.path;
+      const activeWorkspaceId =
+        legacyActivePath ??
+        (raw.activeWorkspaceId && seen.has(raw.activeWorkspaceId) ? raw.activeWorkspaceId : null) ??
+        wsList[0]?.id ??
+        null;
+
+      setWorkspaces(wsList);
+      setActiveWorkspaceId(activeWorkspaceId);
+      setAllConversations(conversations);
+
+      const convs = activeWorkspaceId ? (conversations[activeWorkspaceId] ?? []) : [];
+      if (convs.length > 0) {
+        setActiveId(convs[0].id);
+      } else {
+        const flat = flattenConversations(conversations);
+        if (flat.length > 0) {
+          setActiveId(flat[0].conversation.id);
+          setActiveWorkspaceId(flat[0].workspaceId);
+        }
+      }
+      setLoaded(true);
+    };
+    ensureDefault();
   }, []);
 
   // Persist to localStorage. During agent streaming, allConversations updates
@@ -627,26 +665,26 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
   const removeWorkspace = useCallback((id: string) => {
     setWorkspaces((prev) => prev.filter((w) => w.id !== id));
     if (workspaceFilter === id) setWorkspaceFilter(null);
-    if (activeWorkspaceId === id) {
-      const remaining = workspaces.filter((w) => w.id !== id);
-      const nextActive = remaining[0] ?? null;
-      setActiveWorkspaceId(nextActive?.id ?? null);
-      if (activeId) {
-        const ws = findWorkspaceForConversation(allConversationsRef.current, activeId);
-        if (ws === id) {
-          const flat = flattenConversations(allConversationsRef.current).filter(
-            (e) => e.workspaceId !== id,
-          );
-          if (flat.length > 0) {
-            setActiveId(flat[0].conversation.id);
-            setActiveWorkspaceId(flat[0].workspaceId);
-          } else {
-            setActiveId(null);
-          }
-        }
-      }
+    // Don't switch away from the removed workspace's conversations — they remain
+    // usable as long as the directory still exists on disk.
+  }, [workspaceFilter]);
+
+  // Change the configured default working directory. Config-only: it persists
+  // the choice and updates what `get_default_workspace_path` returns, but does
+  // NOT move existing workspaces or conversations — the new default takes
+  // effect when Pixie starts fresh with no workspaces added.
+  const changeDefaultWorkspace = useCallback(async (newPath: string | null) => {
+    try {
+      await invoke("set_default_workspace_path", { path: newPath });
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+      return;
     }
-  }, [activeWorkspaceId, activeId, workspaceFilter, workspaces]);
+    try {
+      const resolved = await invoke<string>("get_default_workspace_path");
+      setDefaultWorkspacePath(resolved);
+    } catch { /* ignore */ }
+  }, []);
 
   const createConversation = useCallback((workspaceId?: string, engine?: AgentEngineId) => {
     const wsId = workspaceId ?? resolveTargetWorkspace();
@@ -915,6 +953,8 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
     anyEngineAvailable,
     defaultEngine,
     setDefaultEngine,
+    defaultWorkspacePath,
+    changeDefaultWorkspace,
     workspaces: sortedWorkspaces,
     activeWorkspace,
     activeWorkspaceId,

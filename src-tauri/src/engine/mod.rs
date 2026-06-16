@@ -156,6 +156,7 @@ impl NormalizedEvent {
         }
     }
 
+    #[allow(dead_code)]
     pub fn final_text(&self) -> Option<String> {
         match self {
             NormalizedEvent::Final { text } => Some(text.clone()),

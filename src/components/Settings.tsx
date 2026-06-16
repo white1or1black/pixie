@@ -22,6 +22,9 @@ interface SettingsProps {
     engine: AgentEngineId,
     patch: Record<string, string | undefined>,
   ) => void;
+  defaultWorkspacePath: string;
+  onPickDefaultWorkspace: () => void;
+  onResetDefaultWorkspace: () => void;
 }
 
 export default function Settings({
@@ -36,6 +39,9 @@ export default function Settings({
   onSystemPromptChange,
   engineModelConfigs,
   onEngineModelConfigChange,
+  defaultWorkspacePath,
+  onPickDefaultWorkspace,
+  onResetDefaultWorkspace,
 }: SettingsProps) {
   const [_checking, setChecking] = useState(false);
   const [expandedEngines, setExpandedEngines] = useState<Record<AgentEngineId, boolean>>({
@@ -147,6 +153,36 @@ export default function Settings({
             </select>
             <p className="text-xs text-[var(--text-secondary)] mt-2">
               New sessions use this engine. Existing sessions keep their bound engine.
+            </p>
+          </section>
+
+          {/* Default working directory */}
+          <section>
+            <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">
+              Default Working Directory
+            </h3>
+            <div className="bg-[var(--bg-primary)] rounded-xl p-4 border border-[var(--border-color)]">
+              <p className="text-xs text-[var(--text-secondary)] break-all font-mono mb-3">
+                {defaultWorkspacePath || "—"}
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={onPickDefaultWorkspace}
+                  className="px-3 py-1.5 rounded-lg bg-[var(--bg-tertiary)] hover:bg-[var(--accent)]/20 text-xs text-[var(--text-primary)] transition-colors"
+                >
+                  Change…
+                </button>
+                <button
+                  onClick={onResetDefaultWorkspace}
+                  className="px-3 py-1.5 rounded-lg bg-[var(--bg-primary)] hover:bg-[var(--bg-tertiary)] text-xs text-[var(--text-secondary)] border border-[var(--border-color)] transition-colors"
+                >
+                  Reset to ~/.pixie
+                </button>
+              </div>
+            </div>
+            <p className="text-xs text-[var(--text-secondary)] mt-2">
+              The folder Pixie uses by default. Applied on a fresh start with no
+              workspaces added — existing workspaces are not changed.
             </p>
           </section>
 

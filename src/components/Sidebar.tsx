@@ -25,6 +25,7 @@ interface SidebarProps {
   defaultEngine: AgentEngineId;
   onDefaultEngineChange: (engine: AgentEngineId) => void;
   engineStatuses: EngineStatus[];
+  defaultWorkspacePath: string;
 }
 
 function relativeTime(ts: number): string {
@@ -267,6 +268,7 @@ export default function Sidebar({
   defaultEngine,
   onDefaultEngineChange,
   engineStatuses,
+  defaultWorkspacePath,
 }: SidebarProps) {
   const [search, setSearch] = useState("");
   const [wsPendingRemove, setWsPendingRemove] = useState<string | null>(null);
@@ -302,6 +304,15 @@ export default function Sidebar({
   }, [newAgentWsOpen]);
 
   const [historyExpanded, setHistoryExpanded] = useState(false);
+
+  // The auto-created default workspace (the configured default working dir) is
+  // hidden from the UI — it stays as the implicit CWD but never appears in the
+  // workspace list. `workspaces` (incl. the default) is still used elsewhere for
+  // resolving conversation labels.
+  const visibleWorkspaces = useMemo(
+    () => workspaces.filter((w) => w.path !== defaultWorkspacePath),
+    [workspaces, defaultWorkspacePath],
+  );
 
   const filtered = useMemo(() => {
     let list = entries;
@@ -345,7 +356,8 @@ export default function Sidebar({
   }, [activeInHistory]);
 
   const isSearching = search.trim().length > 0;
-  const newAgentTargetWs = workspaceFilter ?? workspaces[0]?.id ?? null;
+  const newAgentTargetWs =
+    workspaceFilter ?? visibleWorkspaces[0]?.id ?? (defaultWorkspacePath || null);
 
   return (
     <>
@@ -367,7 +379,7 @@ export default function Sidebar({
           <div className="shrink-0 h-[38px]" onMouseDown={handleDragRegion} />
         )}
         {/* Workspace filter & management */}
-        {workspaces.length > 0 && (
+        {visibleWorkspaces.length > 0 ? (
           <div className="px-3 py-2 border-b border-[var(--border-color)]">
             <div className="relative" ref={wsDropdownRef}>
               <button
@@ -393,7 +405,7 @@ export default function Sidebar({
                     >
                       All workspaces
                     </button>
-                    {workspaces.map((ws) => (
+                    {visibleWorkspaces.map((ws) => (
                       <div
                         key={ws.id}
                         className={`flex items-center gap-2 px-3 py-2 text-xs hover:bg-[var(--bg-tertiary)] transition-colors ${
@@ -449,6 +461,18 @@ export default function Sidebar({
                   </div>
               )}
             </div>
+          </div>
+        ) : (
+          <div className="px-3 py-2 border-b border-[var(--border-color)]">
+            <button
+              onClick={onAddWorkspace}
+              className="w-full flex items-center justify-center gap-2 bg-[var(--accent)] hover:opacity-90 text-white rounded-lg px-3 py-2 text-xs font-medium transition-opacity cursor-pointer"
+            >
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                <path d="M6 3v6M3 6h6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
+              Add workspace…
+            </button>
           </div>
         )}
 
@@ -552,24 +576,22 @@ export default function Sidebar({
           <div className="relative flex gap-1" ref={newAgentWsRef}>
             <button
               onClick={() => onNew(newAgentTargetWs ?? undefined)}
-              disabled={workspaces.length === 0}
-              className="flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-medium transition-colors"
+              className="flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-xs font-medium transition-colors"
             >
               <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
                 <path d="M7 1v12M1 7h12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" fill="none" />
               </svg>
               New Agent
-              {newAgentTargetWs && workspaces.length > 1 && (
+              {newAgentTargetWs && visibleWorkspaces.length > 1 && (
                 <span className="opacity-70 font-normal">
                   in {workspaceName(workspaces, newAgentTargetWs)}
                 </span>
               )}
             </button>
-            {workspaces.length > 1 && (
+            {visibleWorkspaces.length > 1 && (
               <button
                 onClick={() => setNewAgentWsOpen(!newAgentWsOpen)}
-                disabled={workspaces.length === 0}
-                className="px-2 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-40 text-white transition-colors"
+                className="px-2 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white transition-colors"
                 title="New agent in another workspace"
               >
                 <svg width="12" height="12" viewBox="0 0 12 12" fill="none" className={`transition-transform duration-200 ${newAgentWsOpen ? "rotate-180" : ""}`}>
@@ -577,9 +599,9 @@ export default function Sidebar({
                 </svg>
               </button>
             )}
-            {newAgentWsOpen && workspaces.length > 1 && (
+            {newAgentWsOpen && visibleWorkspaces.length > 1 && (
               <div className="absolute bottom-full right-3 left-3 z-50 mb-1 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg shadow-lg overflow-hidden">
-                {workspaces.map((ws) => (
+                {visibleWorkspaces.map((ws) => (
                   <button
                     key={ws.id}
                     onClick={() => {

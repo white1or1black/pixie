@@ -138,6 +138,8 @@ export default function App() {
     anyEngineAvailable,
     defaultEngine,
     setDefaultEngine,
+    defaultWorkspacePath,
+    changeDefaultWorkspace,
     workspaces,
     activeWorkspace,
     activeWorkspaceId,
@@ -267,6 +269,16 @@ export default function App() {
     [],
   );
 
+  const handlePickDefaultWorkspace = useCallback(async () => {
+    try {
+      const path = await invoke<string | null>("pick_folder");
+      if (path) await changeDefaultWorkspace(path);
+    } catch { /* ignore */ }
+  }, [changeDefaultWorkspace]);
+  const handleResetDefaultWorkspace = useCallback(() => {
+    changeDefaultWorkspace(null);
+  }, [changeDefaultWorkspace]);
+
   // Open a file path or URL in the right-side preview panel (clicked in a chat
   // message). The nonce lets the same target be re-opened.
   // Open a file path or URL from a chat message. URLs are delegated to the
@@ -296,6 +308,7 @@ export default function App() {
       <Sidebar
         entries={unifiedConversations}
         workspaces={workspaces}
+        defaultWorkspacePath={defaultWorkspacePath}
         workspaceFilter={workspaceFilter}
         activeId={activeId}
         generatingIds={generatingIds}
@@ -383,16 +396,19 @@ export default function App() {
                       {activeConversation?.title ?? "Pixie"}
                     </h1>
                   )}
-                  {activeWorkspace && (
-                    <p className="text-[10px] text-[var(--text-secondary)] truncate" title={activeWorkspace.path}>
-                      📁 {activeWorkspace.name}
-                      {activeConversation && (
+                  {(activeConversation ||
+                    (activeWorkspace && activeWorkspace.path !== defaultWorkspacePath)) && (
+                    <p className="text-[10px] text-[var(--text-secondary)] truncate" title={activeWorkspace?.path}>
+                      {activeWorkspace && activeWorkspace.path !== defaultWorkspacePath && (
                         <>
-                          <span className="mx-1">·</span>
-                          <span className="text-[var(--accent)]/80">
-                            {AGENT_ENGINES.find((e) => e.id === activeConversation.engine)?.label ?? activeConversation.engine}
-                          </span>
+                          📁 {activeWorkspace.name}
+                          {activeConversation && <span className="mx-1">·</span>}
                         </>
+                      )}
+                      {activeConversation && (
+                        <span className="text-[var(--accent)]/80">
+                          {AGENT_ENGINES.find((e) => e.id === activeConversation.engine)?.label ?? activeConversation.engine}
+                        </span>
                       )}
                     </p>
                   )}
@@ -492,6 +508,9 @@ export default function App() {
             onSystemPromptChange={handleSystemPromptChange}
             engineModelConfigs={engineModelConfigs}
             onEngineModelConfigChange={handleEngineModelConfigChange}
+            defaultWorkspacePath={defaultWorkspacePath}
+            onPickDefaultWorkspace={handlePickDefaultWorkspace}
+            onResetDefaultWorkspace={handleResetDefaultWorkspace}
           />
         )}
       </div>
