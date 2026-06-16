@@ -528,7 +528,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
             const msgs = [...conv.messages];
             const last = msgs[msgs.length - 1];
             if (last && last.role === "assistant") {
-              msgs[msgs.length - 1] = { ...last, content: done.full_text, status: "done" };
+              msgs[msgs.length - 1] = { ...last, content: done.full_text, status: "done", timestamp: Date.now() };
             }
             return { ...conv, messages: msgs, updatedAt: Date.now() };
           }),
@@ -806,7 +806,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
         const msgs = [...conv.messages];
         const last = msgs[msgs.length - 1];
         if (last && last.role === "assistant" && last.status === "streaming") {
-          msgs[msgs.length - 1] = { ...last, status: "done" };
+          msgs[msgs.length - 1] = { ...last, status: "done", timestamp: Date.now() };
         }
         return { ...conv, messages: msgs };
       }),
