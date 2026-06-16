@@ -43,11 +43,12 @@ export interface Conversation {
   engine: AgentEngineId;
 }
 
-export type AgentEngineId = "claude" | "cursor";
+export type AgentEngineId = "claude" | "cursor" | "codebuddy";
 
 export const AGENT_ENGINES: { id: AgentEngineId; label: string }[] = [
   { id: "claude", label: "Claude Code" },
   { id: "cursor", label: "Cursor Agent" },
+  { id: "codebuddy", label: "CodeBuddy" },
 ];
 
 export interface EngineStatus {
@@ -140,10 +141,16 @@ export interface CursorModelConfig {
   CURSOR_MODEL?: string;
 }
 
+export interface CodebuddyModelConfig {
+  /** Passed to codebuddy as --model when set */
+  CODEBUDDY_MODEL?: string;
+}
+
 /** Per-engine model/env overrides. */
 export type EngineModelConfigs = {
   claude: ClaudeModelConfig;
   cursor: CursorModelConfig;
+  codebuddy: CodebuddyModelConfig;
 };
 
 /** @deprecated Use EngineModelConfigs */
@@ -152,6 +159,7 @@ export type ModelConfig = ClaudeModelConfig;
 export const DEFAULT_ENGINE_MODEL_CONFIGS: EngineModelConfigs = {
   claude: {},
   cursor: {},
+  codebuddy: {},
 };
 
 export const ENGINE_MODEL_FIELDS: Record<
@@ -172,6 +180,7 @@ export const ENGINE_MODEL_FIELDS: Record<
     { key: "CURSOR_API_KEY", label: "API Key", secret: true },
     { key: "CURSOR_MODEL", label: "Model" },
   ],
+  codebuddy: [{ key: "CODEBUDDY_MODEL", label: "Model" }],
 };
 
 export interface FileEntry {

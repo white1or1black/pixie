@@ -143,6 +143,36 @@ pub fn extend_path(env: &mut HashMap<String, String>) {
     }
 }
 
+/// Detach a spawned agent child from any controlling terminal by starting a new
+/// session (`setsid`).
+///
+/// Agent CLIs such as CodeBuddy open `/dev/tty`. When Pixie is launched from a
+/// terminal (e.g. `tauri dev`), the child inherits that controlling terminal
+/// and — as a background process performing tty I/O — is repeatedly stopped by
+/// SIGTTOU/SIGTTIN. A stopped process never exits but keeps its stdout pipe
+/// open, so `read_child_stream` blocks forever and the turn never completes
+/// (the reply hangs on "Streaming…" indefinitely). `setsid()` drops the
+/// controlling terminal, so `/dev/tty` fails to open and the CLI runs fully
+/// headless — exactly as it does when Pixie is launched without a terminal
+/// (double-clicked app / no TTY), where it exits cleanly.
+#[cfg(unix)]
+pub fn detach_from_controlling_terminal(cmd: &mut tokio::process::Command) {
+    // Safety: `setsid()` only changes the caller's session/process-group
+    // membership; it is async-signal-safe. The closure runs in the child
+    // between fork and exec, as `pre_exec` requires.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+pub fn detach_from_controlling_terminal(_cmd: &mut tokio::process::Command) {}
+
 /// Merge process env + login-shell env, filtered by prefix/exact keys.
 pub async fn collect_env(
     engine_id: &str,
@@ -188,6 +218,24 @@ pub async fn run_with_env(
         .map_err(|e| anyhow::anyhow!("failed to execute {}: {e}", binary.display()))
 }
 
+pub const MAX_TOOL_RESULT_CHARS: usize = 8_000;
+
+pub fn truncate_text(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let truncated: String = text.chars().take(max).collect();
+    format!("{truncated}… (truncated)")
+}
+
+/// Lines that are safe to ignore before JSON parsing (CodeBuddy emits many of these).
+pub fn is_ignorable_stream_line(line: &str) -> bool {
+    let line = line.trim();
+    line.is_empty()
+        || line.contains(r#""type":"file-history-snapshot""#)
+        || line.contains(r#""type":"system","subtype":"status""#)
+}
+
 pub fn u64_field(obj: &serde_json::Value, key: &str) -> u64 {
     obj.get(key)
         .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|i| i.max(0) as u64)))
@@ -196,7 +244,9 @@ pub fn u64_field(obj: &serde_json::Value, key: &str) -> u64 {
 
 pub fn extract_result_text(value: Option<&serde_json::Value>) -> Option<String> {
     match value {
-        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(serde_json::Value::String(s)) => {
+            Some(truncate_text(s, MAX_TOOL_RESULT_CHARS))
+        }
         Some(serde_json::Value::Array(arr)) => {
             let mut buf = String::new();
             for block in arr {
@@ -210,10 +260,10 @@ pub fn extract_result_text(value: Option<&serde_json::Value>) -> Option<String> 
             if buf.is_empty() {
                 None
             } else {
-                Some(buf)
+                Some(truncate_text(&buf, MAX_TOOL_RESULT_CHARS))
             }
         }
-        Some(other) => Some(other.to_string()),
+        Some(other) => Some(truncate_text(&other.to_string(), MAX_TOOL_RESULT_CHARS)),
         None => None,
     }
 }

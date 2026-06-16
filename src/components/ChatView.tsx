@@ -77,16 +77,16 @@ export default function ChatView({ conversation, isGenerating, onOpenPreview }: 
   // Scroll to the bottom ONLY when a new message is added (i.e. the user just sent
   // a new turn). The assistant's streaming reply NEVER auto-scrolls, so you can
   // scroll freely and read at your own pace while it generates.
+  const messageCount = conversation?.messages.length ?? 0;
   useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const count = conversation?.messages.length ?? 0;
-    if (count > prevCountRef.current) {
+    if (messageCount > prevCountRef.current) {
       el.scrollTop = el.scrollHeight;
       setShowJump(false);
     }
-    prevCountRef.current = count;
-  }, [conversation?.messages]);
+    prevCountRef.current = messageCount;
+  }, [messageCount]);
 
   const jumpToBottom = useCallback(() => {
     const el = containerRef.current;

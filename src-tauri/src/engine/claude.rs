@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::process::Stdio;
 use tokio::process::{Child, Command};
 
 const CLAUDE_BINARY_NAMES: &[&str] = &["claude"];
@@ -97,8 +98,9 @@ async fn spawn_with_args(args: Vec<String>, message: &str, cwd: Option<&str>) ->
     let mut cmd = Command::new(&binary);
     cmd.args(args)
         .arg(message)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
 
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
@@ -107,6 +109,11 @@ async fn spawn_with_args(args: Vec<String>, message: &str, cwd: Option<&str>) ->
     for (k, v) in &env {
         cmd.env(k, v);
     }
+
+    // Detach from the controlling terminal so the agent can't be
+    // job-control-stopped when Pixie is launched from a terminal. See
+    // shared::detach_from_controlling_terminal.
+    shared::detach_from_controlling_terminal(&mut cmd);
 
     cmd.spawn().context("failed to spawn claude process")
 }
