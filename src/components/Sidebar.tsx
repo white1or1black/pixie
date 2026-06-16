@@ -314,6 +314,10 @@ export default function Sidebar({
           ${isOpen ? "flex translate-x-0 sidebar-enter" : "hidden"}
         `}
       >
+        {/* macOS traffic light drag region */}
+        {navigator.platform?.includes("Mac") && (
+          <div className="shrink-0 h-[38px] titlebar-drag" />
+        )}
         {/* Workspace filter & management */}
         {workspaces.length > 0 && (
           <div className="px-3 py-2 border-b border-[var(--border-color)]">

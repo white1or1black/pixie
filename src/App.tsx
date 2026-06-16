@@ -310,9 +310,11 @@ export default function App() {
       <div className="flex-1 flex flex-col min-w-0">
         {mainView === "chat" && (
           <>
-            {/* Header */}
-            <header className="shrink-0 flex items-center justify-between px-4 py-3 border-b border-[var(--border-color)] bg-[var(--bg-primary)]">
-              <div className="flex items-center gap-3">
+            {/* Header — also serves as drag region on macOS */}
+            <header
+              className={`shrink-0 flex items-center justify-between px-4 py-3 border-b border-[var(--border-color)] bg-[var(--bg-primary)] ${navigator.platform?.includes("Mac") && !sidebarOpen ? "titlebar-drag pl-20" : navigator.platform?.includes("Mac") ? "titlebar-drag" : ""}`}
+            >
+              <div className="flex items-center gap-3 titlebar-no-drag">
                 {/* When the sidebar is collapsed, surface a new-session button at the
                     top-left so users can stay in immersive mode without reopening it. */}
                 {!sidebarOpen && (
@@ -358,7 +360,7 @@ export default function App() {
                   )}
                 </div>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 titlebar-no-drag">
                 <button
                   onClick={() => setFileExplorerOpen((prev) => !prev)}
                   disabled={!activeWorkspace}
