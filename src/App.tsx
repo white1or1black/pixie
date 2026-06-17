@@ -154,6 +154,7 @@ export default function App() {
     deleteConversation,
     sendMessage,
     stopGeneration,
+    respondPermission,
     refreshEngineStatuses,
     clearError,
     addScheduledRun,
@@ -441,7 +442,7 @@ export default function App() {
               </div>
             )}
 
-            <ChatView conversation={activeConversation} isGenerating={isGenerating} onOpenPreview={handleOpenPreview} />
+            <ChatView conversation={activeConversation} isGenerating={isGenerating} onOpenPreview={handleOpenPreview} onRespondPermission={respondPermission} />
 
             <InputBar
               onSend={sendMessage}

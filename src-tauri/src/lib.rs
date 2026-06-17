@@ -4,8 +4,13 @@ mod pty;
 use engine::{
     bind_conversation_engine, check_all_engines, conversation_engine_id,
     init_conversation_engine_map, normalize_engine_id, read_child_stream, remember_session_id,
-    resolve_session_id, spawn_continue, spawn_single, AgentProcess, ConversationEngineMap,
+    resolve_session_id, spawn_continue, spawn_headless, spawn_single, AgentProcess, ConversationEngineMap,
     EngineStatus, NormalizedEvent, SharedAgentProcess,
+};
+use engine::persistent::{
+    self as ps, PersistentSession, SessionMap,
+    IDLE_TIMEOUT, MAX_SESSIONS,
+    read_persistent_turn,
 };
 use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone, Utc};
 use pty::PtyMap;
@@ -112,6 +117,18 @@ pub struct ResponseError {
     pub error: String,
 }
 
+/// Permission request from the agent (it wants to run a tool and needs user approval).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResponsePermissionRequest {
+    pub conversation_id: String,
+    /// Unique ID of the permission request (from the CLI).
+    pub request_id: String,
+    /// Tool name (e.g. "Bash", "Edit", "Write").
+    pub tool_name: String,
+    /// Tool input as a JSON value.
+    pub input: serde_json::Value,
+}
+
 /// A chunk of the model's private reasoning (extended thinking) text.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponseThinkingText {
@@ -203,6 +220,8 @@ pub struct AppState {
     pty_map: PtyMap,
     /// Running agent child pids, for immediate stop without lock contention
     kill_registry: KillRegistry,
+    /// Persistent (long-lived) sessions for Claude/CodeBuddy
+    sessions: SessionMap,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -347,6 +366,18 @@ fn emit_agent_events(
                 },
             );
         }
+
+        if let NormalizedEvent::PermissionRequest { id, tool_name, input } = evt {
+            let _ = app.emit(
+                "agent-permission-request",
+                ResponsePermissionRequest {
+                    conversation_id: conversation_id.to_string(),
+                    request_id: id.clone(),
+                    tool_name: tool_name.clone(),
+                    input: input.clone(),
+                },
+            );
+        }
     }
 }
 
@@ -392,6 +423,179 @@ async fn send_message(
         message.len()
     );
 
+    let workspace = state.workspace.lock().await.clone();
+    let session_id =
+        resolve_session_id(&state.conversation_engines, &conversation_id, engine_id).await;
+
+    // --- Persistent session path (Claude / CodeBuddy) ---
+    if engine_id == "claude" || engine_id == "codebuddy" {
+        let sessions = state.sessions.clone();
+        let kill_registry = state.kill_registry.clone();
+        let conversation_engines = state.conversation_engines.clone();
+        let app_handle = app.clone();
+        let conv_id = conversation_id.clone();
+        let engine_id_owned = engine_id.to_string();
+        let message_owned = message.clone();
+        let session_id_owned = session_id.clone();
+        let workspace_owned = workspace.clone();
+
+        tokio::spawn(async move {
+            let mut sessions = sessions.lock().await;
+
+            // Try to reuse an existing live session.
+            let needs_spawn = match sessions.get_mut(&conv_id) {
+                Some(session) => {
+                    if session.is_alive() {
+                        log::info!("[send_message] reusing persistent session for {}", conv_id);
+                        // Write message to the existing session's stdin.
+                        if let Err(e) = session.send_message(&message_owned).await {
+                            log::warn!("[send_message] stdin write failed, will respawn: {}", e);
+                            session.kill().await;
+                            sessions.remove(&conv_id);
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        log::info!("[send_message] persistent session dead, will respawn");
+                        sessions.remove(&conv_id);
+                        true
+                    }
+                }
+                None => true,
+            };
+
+            // Spawn a new persistent session if needed.
+            if needs_spawn {
+                let resume = is_continue;
+                log::info!(
+                    "[send_message] spawning persistent session: engine={}, resume={}",
+                    engine_id_owned, resume
+                );
+                match PersistentSession::spawn(
+                    &engine_id_owned,
+                    &session_id_owned,
+                    resume,
+                    workspace_owned.as_deref(),
+                )
+                .await
+                {
+                    Ok(mut session) => {
+                        // Send the first message via stdin.
+                        if let Err(e) = session.send_message(&message_owned).await {
+                            log::error!("[send_message] failed to write first message: {}", e);
+                            let _ = app_handle.emit(
+                                "agent-error",
+                                ResponseError {
+                                    conversation_id: conv_id.clone(),
+                                    error: format!("Failed to send message: {}", e),
+                                },
+                            );
+                            return;
+                        }
+                        if let Some(pid) = session.pid() {
+                            log::info!("[send_message] persistent pid {} for conv {}", pid, conv_id);
+                            kill_registry.lock().await.insert(conv_id.clone(), pid);
+                        }
+                        sessions.insert(conv_id.clone(), session);
+                    }
+                    Err(e) => {
+                        log::error!("[send_message] persistent spawn failed: {}", e);
+                        let _ = app_handle.emit(
+                            "agent-error",
+                            ResponseError {
+                                conversation_id: conv_id.clone(),
+                                error: format!("Failed to start {}: {}", engine_id_owned, e),
+                            },
+                        );
+                        return;
+                    }
+                }
+            }
+
+            // Get the stdout reader from the session.
+            let stdout = sessions
+                .get(&conv_id)
+                .map(|s| s.stdout())
+                .unwrap();
+
+            // We must release the sessions lock before reading, so the
+            // read_persistent_turn can proceed without deadlock.
+            drop(sessions);
+
+            let engines_after = conversation_engines.clone();
+            let conv_id_after = conv_id.clone();
+            let engine_for_stream = engine_id_owned.clone();
+            let mut last_thinking: u64 = 0;
+            let mut stream_had_error = false;
+
+            let result = read_persistent_turn(&engine_for_stream, stdout, |events| {
+                for evt in events {
+                    if matches!(evt, NormalizedEvent::Error { .. }) {
+                        stream_had_error = true;
+                    }
+                    if let Some(sid) = evt.session_id() {
+                        let engines = engines_after.clone();
+                        let conv = conv_id.clone();
+                        let eng = engine_id_owned.clone();
+                        tokio::spawn(async move {
+                            remember_session_id(&engines, &conv, &eng, &sid).await;
+                        });
+                    }
+                }
+                emit_agent_events(&app_handle, &conv_id, events, &mut last_thinking);
+            })
+            .await;
+
+            // Remove PID from kill registry (the session process stays alive
+            // but we don't want stop_generation to kill it now that the turn
+            // is complete).
+            kill_registry.lock().await.remove(&conv_id_after);
+
+            // If the stream failed, the persistent session is likely dead.
+            // Remove it so the next message will respawn.
+            if result.is_err() || stream_had_error {
+                let sessions_map = state_sessions_ref(&app_handle);
+                let mut sessions = sessions_map.lock().await;
+                if let Some(s) = sessions.get_mut(&conv_id_after) {
+                    s.kill().await;
+                    sessions.remove(&conv_id_after);
+                }
+            }
+
+            if stream_had_error {
+                log::info!("[send_message] persistent stream ended with error for conv {}", conv_id_after);
+                return;
+            }
+
+            match result {
+                Ok(full_text) => {
+                    log::info!("[send_message] persistent done, total_len={}", full_text.len());
+                    let _ = app_handle.emit(
+                        "agent-done",
+                        ResponseDone {
+                            conversation_id: conv_id_after,
+                            full_text,
+                        },
+                    );
+                }
+                Err(e) => {
+                    log::error!("[send_message] persistent stream error: {}", e);
+                    let _ = app_handle.emit(
+                        "agent-error",
+                        ResponseError {
+                            conversation_id: conv_id_after,
+                            error: e.to_string(),
+                        },
+                    );
+                }
+            }
+        });
+
+        return Ok(());
+    }
+
+    // --- Legacy path (Cursor) ---
     {
         let mut processes = state.processes.lock().await;
         if !processes.contains_key(&conversation_id) {
@@ -401,10 +605,6 @@ async fn send_message(
             );
         }
     }
-
-    let workspace = state.workspace.lock().await.clone();
-    let session_id =
-        resolve_session_id(&state.conversation_engines, &conversation_id, engine_id).await;
 
     let kill_registry = state.kill_registry.clone();
     let conversation_engines = state.conversation_engines.clone();
@@ -511,6 +711,12 @@ async fn send_message(
     });
 
     Ok(())
+}
+
+/// Helper to get a reference to the SessionMap from the AppHandle.
+/// This is needed inside spawned tasks where `state` is not available.
+fn state_sessions_ref(app: &AppHandle) -> SessionMap {
+    app.state::<AppState>().sessions.clone()
 }
 
 #[tauri::command]
@@ -1034,9 +1240,19 @@ async fn stop_generation(
     conversation_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    // Kill the running claude process by pid. We deliberately do NOT lock `proc_arc`
-    // here, because the streaming task holds that lock for the whole stream read —
-    // acquiring it would block until the response finishes naturally (i.e. never stop).
+    // First, check if this is a persistent session (Claude/CodeBuddy).
+    {
+        let mut sessions = state.sessions.lock().await;
+        if let Some(session) = sessions.get_mut(&conversation_id) {
+            log::info!("[stop_generation] killing persistent session for conv {}", conversation_id);
+            // Kill the persistent process. The next message will respawn via --resume.
+            session.kill().await;
+            sessions.remove(&conversation_id);
+            return Ok(());
+        }
+    }
+
+    // Legacy path (Cursor / fallback).
     let pid = {
         let registry = state.kill_registry.lock().await;
         registry.get(&conversation_id).copied()
@@ -1064,6 +1280,37 @@ async fn stop_generation(
     }
 
     Ok(())
+}
+
+/// Respond to a permission request from the agent.
+/// When the agent emits a `permission_request` event, the frontend shows
+/// a confirmation dialog. This command writes the user's response back
+/// to the persistent session's stdin.
+#[tauri::command]
+async fn respond_permission(
+    conversation_id: String,
+    allow: bool,
+    message: Option<String>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let sessions = state_sessions_ref(&app);
+    let mut sessions = sessions.lock().await;
+
+    match sessions.get_mut(&conversation_id) {
+        Some(session) => {
+            if !session.is_alive() {
+                return Err("Session is no longer alive".to_string());
+            }
+            session
+                .respond_permission(allow, message.as_deref())
+                .await
+                .map_err(|e| format!("Failed to send permission response: {}", e))
+        }
+        None => Err(format!(
+            "No persistent session found for conversation {}",
+            conversation_id
+        )),
+    }
 }
 
 #[tauri::command]
@@ -1491,7 +1738,7 @@ async fn run_task_headless(app: AppHandle, task: ScheduledTask, conversation_id:
         return;
     }
 
-    let child = match spawn_single(
+    let child = match spawn_headless(
         "claude",
         &conversation_id,
         &task.prompt,
@@ -1805,6 +2052,61 @@ pub fn run() {
                 }
             });
 
+            // --- Idle persistent session cleanup ---
+            // Kill sessions that have been idle too long, and enforce the
+            // maximum concurrent session limit.
+            {
+                let sessions: SessionMap = app.state::<AppState>().sessions.clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                    loop {
+                        interval.tick().await;
+                        let mut sessions = sessions.lock().await;
+                        // Shut down idle sessions.
+                        sessions.retain(|conv_id, session| {
+                            if session.last_active.elapsed() > IDLE_TIMEOUT {
+                                log::info!(
+                                    "[cleanup] idle timeout: closing persistent session for {}",
+                                    conv_id
+                                );
+                                // Can't call async shutdown here (retain is sync),
+                                // so just kill. Drop will also send SIGTERM.
+                                true // will remove below
+                            } else {
+                                true
+                            }
+                        });
+                        // Actually remove and kill the idle ones.
+                        let idle_keys: Vec<String> = sessions
+                            .iter()
+                            .filter(|(_, s)| s.last_active.elapsed() > IDLE_TIMEOUT)
+                            .map(|(k, _)| k.clone())
+                            .collect();
+                        for key in idle_keys {
+                            if let Some(mut s) = sessions.remove(&key) {
+                                s.kill().await;
+                            }
+                        }
+                        // Enforce MAX_SESSIONS: evict the least recently used.
+                        if sessions.len() > MAX_SESSIONS {
+                            let mut entries: Vec<(String, std::time::Instant)> = sessions
+                                .iter()
+                                .map(|(k, s)| (k.clone(), s.last_active))
+                                .collect();
+                            entries.sort_by_key(|(_, t)| *t);
+                            while sessions.len() > MAX_SESSIONS {
+                                if let Some((oldest_id, _)) = entries.first() {
+                                    if let Some(mut s) = sessions.remove(oldest_id) {
+                                        log::info!("[cleanup] evicting LRU session for {}", oldest_id);
+                                        s.kill().await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
             // --- System tray (keeps the app resident when the window is hidden) ---
             let show_item = MenuItem::with_id(app, "show", "Show Pixie", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit Pixie", true, None::<&str>)?;
@@ -1860,6 +2162,7 @@ pub fn run() {
             workspace: Arc::new(Mutex::new(None)),
             pty_map: pty::init_pty_map(),
             kill_registry: Arc::new(Mutex::new(HashMap::new())),
+            sessions: ps::init_session_map(),
         })
         .on_window_event(|window, event| {
             // Close button hides to tray instead of quitting, so scheduled tasks keep firing.
@@ -1891,6 +2194,7 @@ pub fn run() {
             pty_resize,
             pty_kill,
             stop_generation,
+            respond_permission,
             get_default_workspace_path,
             set_default_workspace_path,
             pick_folder,

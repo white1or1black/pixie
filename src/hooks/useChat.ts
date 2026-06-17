@@ -13,6 +13,7 @@ import type {
   ResponseUsage,
   ResponseThinking,
   ResponseThinkingText,
+  ResponsePermissionRequest,
   MessageUsage,
   ToolStep,
   WorkspaceState,
@@ -525,6 +526,19 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
     };
   }, [loaded, workspaces, activeWorkspaceId, allConversations, generatingIds]);
 
+  // Flush pending saves before the page unloads (app quit / crash).
+  // Without this, any data in the 2-second debounce window is lost.
+  useEffect(() => {
+    const handler = () => {
+      const snap = latestPersistRef.current;
+      if (snap) {
+        saveData(snap.workspaces, snap.activeWorkspaceId, snap.allConversations);
+      }
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, []);
+
   useEffect(() => {
     if (activeWorkspace?.path) {
       invoke("set_active_workspace", { path: activeWorkspace.path }).catch(() => {});
@@ -631,8 +645,34 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
         });
       });
 
-      if (!mounted) { u1(); u2(); u3(); u4(); u5(); u6(); u7(); return; }
-      unlistenRefs.current = [u1, u2, u3, u4, u5, u6, u7];
+      // Permission request: the agent wants to run a tool and needs user approval.
+      const u8 = await listen<ResponsePermissionRequest>("agent-permission-request", (event) => {
+        const req = event.payload;
+        flushStreamBatches(req.conversation_id);
+        setAllConversations((prev) =>
+          patchConversation(prev, req.conversation_id, (conv) => {
+            const msgs = [...conv.messages];
+            const last = msgs[msgs.length - 1];
+            if (last && last.role === "assistant") {
+              const existing = last.pendingPermissions ?? [];
+              // Avoid duplicates (same requestId)
+              if (!existing.some((p) => p.requestId === req.request_id)) {
+                msgs[msgs.length - 1] = {
+                  ...last,
+                  pendingPermissions: [
+                    ...existing,
+                    { requestId: req.request_id, toolName: req.tool_name, input: req.input },
+                  ],
+                };
+              }
+            }
+            return { ...conv, messages: msgs };
+          }),
+        );
+      });
+
+      if (!mounted) { u1(); u2(); u3(); u4(); u5(); u6(); u7(); u8(); return; }
+      unlistenRefs.current = [u1, u2, u3, u4, u5, u6, u7, u8];
     }
 
     setup();
@@ -868,6 +908,37 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
     );
   }, [activeId]);
 
+  const respondPermission = useCallback(
+    async (convId: string, requestId: string, allow: boolean) => {
+      try {
+        await invoke("respond_permission", {
+          conversationId: convId,
+          allow,
+          message: allow ? undefined : "User denied",
+        });
+      } catch (e) {
+        console.error("[respondPermission] failed:", e);
+      }
+      // Remove the pending permission from the message
+      setAllConversations((prev) =>
+        patchConversation(prev, convId, (conv) => {
+          const msgs = [...conv.messages];
+          const last = msgs[msgs.length - 1];
+          if (last && last.role === "assistant" && last.pendingPermissions) {
+            msgs[msgs.length - 1] = {
+              ...last,
+              pendingPermissions: last.pendingPermissions.filter(
+                (p) => p.requestId !== requestId,
+              ),
+            };
+          }
+          return { ...conv, messages: msgs };
+        }),
+      );
+    },
+    [],
+  );
+
   const clearError = useCallback(() => { setError(null); }, []);
 
   const addScheduledRun = useCallback((run: TaskRunRecord) => {
@@ -969,6 +1040,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
     deleteConversation,
     sendMessage,
     stopGeneration,
+    respondPermission,
     refreshEngineStatuses,
     clearError,
     addScheduledRun,
