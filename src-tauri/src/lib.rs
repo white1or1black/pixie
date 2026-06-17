@@ -28,12 +28,33 @@ use tokio::sync::Mutex;
 // Data types shared with the frontend
 // ---------------------------------------------------------------------------
 
+/// Frontend app settings + workspace/session state, persisted as `config.json`.
+/// Each field is optional/defaults so older files (or partial writes) still load.
+/// `engine_model_configs` carries per-engine env overrides (incl. API keys) as an
+/// opaque JSON blob — the frontend owns that schema.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AppConfig {
+    #[serde(default)]
+    pub theme: Option<String>,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    #[serde(default)]
+    pub default_engine: Option<String>,
+    #[serde(default)]
+    pub engine_model_configs: serde_json::Value,
+    #[serde(default)]
+    pub workspaces: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub active_workspace_id: Option<String>,
+}
+
+/// One line of `history.jsonl`: a conversation (full, with messages) and the
+/// workspace path it belongs to. The conversation is an opaque JSON value so the
+/// frontend stays the single source of truth for the message schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Conversation {
-    pub id: String,
-    pub title: String,
-    pub created_at: String,
-    pub updated_at: String,
+pub struct HistoryEntry {
+    pub workspace_id: String,
+    pub conversation: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1384,85 +1405,64 @@ async fn get_workspace(
     }
 }
 
+/// Load `config.json`, or `None` when the file does not exist yet (first run).
 #[tauri::command]
-async fn get_conversations(app: AppHandle) -> Result<Vec<Conversation>, String> {
-    let data_dir = get_data_dir(&app)?;
-    let conversations_file = data_dir.join("conversations.json");
+async fn load_app_config(app: AppHandle) -> Result<Option<AppConfig>, String> {
+    let file = get_data_dir(&app)?.join("config.json");
+    if !file.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&file).map_err(|e| format!("Failed to read config.json: {e}"))?;
+    // Tolerate a corrupted/partial file by falling back to defaults rather than
+    // bricking the app on a bad read.
+    let config: AppConfig = serde_json::from_str(&content).unwrap_or_default();
+    Ok(Some(config))
+}
 
-    if !conversations_file.exists() {
+/// Persist the full app config to `config.json` atomically.
+#[tauri::command]
+async fn save_app_config(config: AppConfig, app: AppHandle) -> Result<(), String> {
+    let data_dir = get_data_dir(&app)?;
+    fs::create_dir_all(&data_dir).map_err(|e| format!("Failed to create data directory: {e}"))?;
+    let json = serde_json::to_string_pretty(&config).map_err(|e| format!("Failed to serialize config: {e}"))?;
+    atomic_write(&data_dir.join("config.json"), &json)
+}
+
+/// Load every conversation from `history.jsonl` (one entry per line). Malformed
+/// lines are skipped so a single bad line can't prevent startup.
+#[tauri::command]
+async fn load_history(app: AppHandle) -> Result<Vec<HistoryEntry>, String> {
+    let file = get_data_dir(&app)?.join("history.jsonl");
+    if !file.exists() {
         return Ok(vec![]);
     }
-
-    let content = fs::read_to_string(&conversations_file)
-        .map_err(|e| format!("Failed to read conversations: {}", e))?;
-
-    let conversations: Vec<Conversation> = serde_json::from_str(&content)
-        .unwrap_or_default();
-
-    Ok(conversations)
+    let content = fs::read_to_string(&file).map_err(|e| format!("Failed to read history.jsonl: {e}"))?;
+    let mut entries = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(entry) = serde_json::from_str::<HistoryEntry>(line) {
+            entries.push(entry);
+        }
+    }
+    Ok(entries)
 }
 
+/// Overwrite `history.jsonl` with one JSON line per entry (full snapshot).
+/// The frontend coalesces/debounces calls so this receives the latest state.
 #[tauri::command]
-async fn save_conversation(
-    conversation: Conversation,
-    app: AppHandle,
-) -> Result<(), String> {
+async fn save_history(entries: Vec<HistoryEntry>, app: AppHandle) -> Result<(), String> {
     let data_dir = get_data_dir(&app)?;
-    let conversations_file = data_dir.join("conversations.json");
-
-    fs::create_dir_all(&data_dir)
-        .map_err(|e| format!("Failed to create data directory: {}", e))?;
-
-    let mut conversations: Vec<Conversation> = if conversations_file.exists() {
-        let content = fs::read_to_string(&conversations_file)
-            .map_err(|e| format!("Failed to read conversations: {}", e))?;
-        serde_json::from_str(&content).unwrap_or_default()
-    } else {
-        vec![]
-    };
-
-    if let Some(existing) = conversations.iter_mut().find(|c| c.id == conversation.id) {
-        *existing = conversation.clone();
-    } else {
-        conversations.push(conversation);
+    fs::create_dir_all(&data_dir).map_err(|e| format!("Failed to create data directory: {e}"))?;
+    let mut out = String::new();
+    for entry in &entries {
+        let line = serde_json::to_string(entry).map_err(|e| format!("Failed to serialize history entry: {e}"))?;
+        out.push_str(&line);
+        out.push('\n');
     }
-
-    let json = serde_json::to_string_pretty(&conversations)
-        .map_err(|e| format!("Failed to serialize conversations: {}", e))?;
-
-    fs::write(&conversations_file, json)
-        .map_err(|e| format!("Failed to write conversations: {}", e))?;
-
-    Ok(())
-}
-
-#[tauri::command]
-async fn delete_conversation(
-    conversation_id: String,
-    app: AppHandle,
-) -> Result<(), String> {
-    let data_dir = get_data_dir(&app)?;
-    let conversations_file = data_dir.join("conversations.json");
-
-    if !conversations_file.exists() {
-        return Ok(());
-    }
-
-    let content = fs::read_to_string(&conversations_file)
-        .map_err(|e| format!("Failed to read conversations: {}", e))?;
-
-    let mut conversations: Vec<Conversation> = serde_json::from_str(&content)
-        .unwrap_or_default();
-
-    conversations.retain(|c| c.id != conversation_id);
-
-    let json = serde_json::to_string_pretty(&conversations)
-        .map_err(|e| format!("Failed to serialize conversations: {}", e))?;
-
-    fs::write(&conversations_file, json)
-        .map_err(|e| format!("Failed to write conversations: {}", e))?;
-
-    Ok(())
+    atomic_write(&data_dir.join("history.jsonl"), &out)
 }
 
 #[tauri::command]
@@ -1487,6 +1487,22 @@ fn get_data_dir(_app: &AppHandle) -> Result<PathBuf, String> {
     let dirs = directories::ProjectDirs::from("com", "pixie", "Pixie")
         .ok_or_else(|| "Failed to determine app data directory".to_string())?;
     Ok(dirs.data_dir().to_path_buf())
+}
+
+/// Atomically replace `path` with `content`: write to a temp file in the SAME
+/// directory, then rename over the target. On macOS `fs::rename` is atomic
+/// within one volume (the data dir always is), so a crash mid-write leaves the
+/// previous file intact instead of a truncated/corrupt one.
+fn atomic_write(path: &std::path::Path, content: &str) -> Result<(), String> {
+    let dir = path.parent().ok_or_else(|| "target path has no parent".to_string())?;
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "data".to_string());
+    let tmp = dir.join(format!("{file_name}.tmp"));
+    fs::write(&tmp, content).map_err(|e| format!("Failed to write {}: {e}", tmp.display()))?;
+    fs::rename(&tmp, path).map_err(|e| format!("Failed to finalize {}: {e}", path.display()))?;
+    Ok(())
 }
 
 fn persist_workspace(app: &AppHandle, path: &str) {
@@ -2202,9 +2218,10 @@ pub fn run() {
             pick_files,
             get_workspace,
             set_active_workspace,
-            get_conversations,
-            save_conversation,
-            delete_conversation,
+            load_app_config,
+            save_app_config,
+            load_history,
+            save_history,
             check_engines_available,
             check_engine_available,
             list_scheduled_tasks,

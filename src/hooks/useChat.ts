@@ -21,9 +21,8 @@ import type {
   TaskRunRecord,
 } from "../types";
 import { AGENT_ENGINES } from "../types";
+import { getConfig, getHistory, setHistory, updateConfig } from "../lib/storage";
 
-const DATA_KEY = "pixie-data";
-const DEFAULT_ENGINE_KEY = "pixie-default-engine";
 const DEFAULT_WORKSPACE_NAME = "Default";
 
 function normalizeConversation(conv: Conversation): Conversation {
@@ -33,12 +32,6 @@ function normalizeConversation(conv: Conversation): Conversation {
   };
 }
 
-interface AppData {
-  workspaces: WorkspaceState[];
-  activeWorkspaceId: string | null;
-  conversations: Record<string, Conversation[]>; // workspaceId → conversations
-}
-
 export interface ConversationEntry {
   conversation: Conversation;
   workspaceId: string;
@@ -46,20 +39,6 @@ export interface ConversationEntry {
 
 function generateId(): string {
   return crypto.randomUUID();
-}
-
-function loadData(): AppData {
-  try {
-    const raw = localStorage.getItem(DATA_KEY);
-    if (raw) return JSON.parse(raw);
-  } catch { /* ignore */ }
-  return { workspaces: [], activeWorkspaceId: null, conversations: {} };
-}
-
-function saveData(workspaces: WorkspaceState[], activeWorkspaceId: string | null, conversations: Record<string, Conversation[]>): void {
-  try {
-    localStorage.setItem(DATA_KEY, JSON.stringify({ workspaces, activeWorkspaceId, conversations }));
-  } catch { /* ignore */ }
 }
 
 function generateTitle(content: string): string {
@@ -283,13 +262,9 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
   const [workspaceFilter, setWorkspaceFilter] = useState<string | null>(null);
   const [generatingIds, setGeneratingIds] = useState<Set<string>>(new Set());
   const [engineStatuses, setEngineStatuses] = useState<EngineStatus[] | null>(null);
-  const [defaultEngine, setDefaultEngine] = useState<AgentEngineId>(() => {
-    const stored = localStorage.getItem(DEFAULT_ENGINE_KEY);
-    if (stored === "cursor" || stored === "codebuddy" || stored === "claude") {
-      return stored;
-    }
-    return "claude";
-  });
+  const [defaultEngine, setDefaultEngine] = useState<AgentEngineId>(
+    () => getConfig().defaultEngine,
+  );
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [defaultWorkspacePath, setDefaultWorkspacePath] = useState<string>("");
@@ -308,11 +283,6 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
   // The terminal agent-done/agent-error flush bypasses this (immediate).
   const STREAM_FLUSH_MIN_MS = 50;
   const saveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const latestPersistRef = useRef<{
-    workspaces: WorkspaceState[];
-    activeWorkspaceId: string | null;
-    allConversations: Record<string, Conversation[]>;
-  } | null>(null);
 
   const flushStreamBatches = useCallback((onlyConvId?: string) => {
     const pending = streamBatchesRef.current;
@@ -428,7 +398,19 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
 
   // Load data
   useEffect(() => {
-    const raw = loadData();
+    // Seeded from disk via the storage module (bootstrap() already resolved
+    // before this hook mounted). Group history entries back into the
+    // workspaceId → Conversation[] shape the rest of this effect expects.
+    const cfg = getConfig();
+    const conversationsFromHistory: Record<string, Conversation[]> = {};
+    for (const { workspaceId, conversation } of getHistory()) {
+      (conversationsFromHistory[workspaceId] ??= []).push(conversation);
+    }
+    const raw = {
+      workspaces: cfg.workspaces,
+      activeWorkspaceId: cfg.activeWorkspaceId,
+      conversations: conversationsFromHistory,
+    };
 
     const conversations: Record<string, Conversation[]> = {};
     const seen = new Set<string>();
@@ -491,14 +473,12 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
     ensureDefault();
   }, []);
 
-  // Persist to localStorage. During agent streaming, allConversations updates
-  // ~60×/s; synchronous JSON.stringify of the full history blocks the main thread
-  // and freezes the UI (especially with CodeBuddy's high event rate). Debounce
-  // while generating; save immediately once idle.
+  // Persist history to disk. Reacts only to conversation changes (not workspace
+  // selection) so switching the active session never rewrites the whole file.
+  // Debounced while an agent is streaming; immediate when idle. The storage
+  // module then coalesces and serializes the actual invoke.
   useEffect(() => {
     if (!loaded) return;
-
-    latestPersistRef.current = { workspaces, activeWorkspaceId, allConversations };
 
     if (saveDebounceRef.current) {
       clearTimeout(saveDebounceRef.current);
@@ -506,10 +486,11 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
     }
 
     const persist = () => {
-      const snap = latestPersistRef.current;
-      if (snap) {
-        saveData(snap.workspaces, snap.activeWorkspaceId, snap.allConversations);
-      }
+      setHistory(
+        flattenConversations(allConversations).map(
+          ({ workspaceId, conversation }) => ({ workspaceId, conversation }),
+        ),
+      );
     };
 
     if (generatingIds.size > 0) {
@@ -524,20 +505,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
         saveDebounceRef.current = null;
       }
     };
-  }, [loaded, workspaces, activeWorkspaceId, allConversations, generatingIds]);
-
-  // Flush pending saves before the page unloads (app quit / crash).
-  // Without this, any data in the 2-second debounce window is lost.
-  useEffect(() => {
-    const handler = () => {
-      const snap = latestPersistRef.current;
-      if (snap) {
-        saveData(snap.workspaces, snap.activeWorkspaceId, snap.allConversations);
-      }
-    };
-    window.addEventListener("beforeunload", handler);
-    return () => window.removeEventListener("beforeunload", handler);
-  }, []);
+  }, [loaded, allConversations, generatingIds]);
 
   useEffect(() => {
     if (activeWorkspace?.path) {
@@ -556,9 +524,19 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
       );
   }, []);
 
+  // Mirror session/settings state owned by this hook into config.json (merged
+  // into the module singleton alongside App-owned fields, then coalesced).
   useEffect(() => {
-    localStorage.setItem(DEFAULT_ENGINE_KEY, defaultEngine);
-  }, [defaultEngine]);
+    if (loaded) updateConfig({ workspaces });
+  }, [loaded, workspaces]);
+
+  useEffect(() => {
+    if (loaded) updateConfig({ activeWorkspaceId });
+  }, [loaded, activeWorkspaceId]);
+
+  useEffect(() => {
+    if (loaded) updateConfig({ defaultEngine });
+  }, [loaded, defaultEngine]);
 
   // Listen to Tauri events — route updates by conversation_id, not active workspace.
   useEffect(() => {
@@ -762,12 +740,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
         c.id === id ? { ...c, title: newTitle } : c
       ),
     }));
-    const conv = (allConversationsRef.current[wsId] ?? []).find((c) => c.id === id);
-    if (conv) {
-      invoke("save_conversation", {
-        conversation: { id: conv.id, title: newTitle, created_at: new Date(conv.createdAt).toISOString(), updated_at: new Date(conv.updatedAt).toISOString() },
-      }).catch(() => {});
-    }
+    // Title is persisted via the debounced history save (setHistory in the persist effect).
   }, []);
 
   const deleteConversation = useCallback((id: string, workspaceId?: string) => {
@@ -778,7 +751,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
       ...prev,
       [wsId]: (prev[wsId] ?? []).filter((c) => c.id !== id),
     }));
-    invoke("delete_conversation", { conversationId: id }).catch(() => {});
+    // Removal is persisted via the debounced history save (setHistory in the persist effect).
     if (activeId === id) {
       setActiveId(null);
       setError(null);

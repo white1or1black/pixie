@@ -19,30 +19,8 @@ import type {
   TaskRunRecord,
   EngineStatus,
 } from "./types";
-import { AGENT_ENGINES, DEFAULT_ENGINE_MODEL_CONFIGS } from "./types";
-
-function loadEngineModelConfigs(): EngineModelConfigs {
-  try {
-    const stored = localStorage.getItem("pixie-engine-model-configs");
-    if (stored) {
-      const parsed = JSON.parse(stored) as Partial<EngineModelConfigs>;
-      return {
-        claude: { ...DEFAULT_ENGINE_MODEL_CONFIGS.claude, ...parsed.claude },
-        cursor: { ...DEFAULT_ENGINE_MODEL_CONFIGS.cursor, ...parsed.cursor },
-        codebuddy: { ...DEFAULT_ENGINE_MODEL_CONFIGS.codebuddy, ...parsed.codebuddy },
-      };
-    }
-    const legacy = localStorage.getItem("pixie-model-config");
-    if (legacy) {
-      return {
-        claude: { ...DEFAULT_ENGINE_MODEL_CONFIGS.claude, ...JSON.parse(legacy) },
-        cursor: { ...DEFAULT_ENGINE_MODEL_CONFIGS.cursor },
-        codebuddy: { ...DEFAULT_ENGINE_MODEL_CONFIGS.codebuddy },
-      };
-    }
-  } catch { /* ignore */ }
-  return { ...DEFAULT_ENGINE_MODEL_CONFIGS };
-}
+import { AGENT_ENGINES } from "./types";
+import { bootstrap, getConfig, updateConfig } from "./lib/storage";
 
 // Brand mark — same art as the app/README icon.
 const iconUrl = new URL("./assets/icon.svg", import.meta.url).href;
@@ -101,7 +79,7 @@ function NoEngineAvailable({
   );
 }
 
-export default function App() {
+function AppShell() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [fileExplorerOpen, setFileExplorerOpen] = useState(false);
   const [headerEditing, setHeaderEditing] = useState(false);
@@ -113,14 +91,11 @@ export default function App() {
   // Which full-page view the main column shows. The sidebar buttons switch
   // this; New Agent / selecting a conversation returns to "chat".
   const [mainView, setMainView] = useState<"chat" | "tasks" | "skills" | "settings">("chat");
-  const [theme, setTheme] = useState<"dark" | "light">(() => {
-    const stored = localStorage.getItem("pixie-theme");
-    return (stored as "dark" | "light") ?? "dark";
-  });
-  const [systemPrompt, setSystemPrompt] = useState(() => {
-    return localStorage.getItem("pixie-system-prompt") ?? "";
-  });
-  const [engineModelConfigs, setEngineModelConfigs] = useState<EngineModelConfigs>(loadEngineModelConfigs);
+  const [theme, setTheme] = useState<"dark" | "light">(() => getConfig().theme);
+  const [systemPrompt, setSystemPrompt] = useState(() => getConfig().systemPrompt);
+  const [engineModelConfigs, setEngineModelConfigs] = useState<EngineModelConfigs>(
+    () => getConfig().engineModelConfigs,
+  );
   const [skills, setSkills] = useState<SkillEntry[]>([]);
   // Composer drafts are kept per conversation (keyed by conversation id, derived
   // below once activeId is known) so each session binds its own input and
@@ -211,15 +186,15 @@ export default function App() {
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
-    localStorage.setItem("pixie-theme", theme);
+    updateConfig({ theme });
   }, [theme]);
 
   useEffect(() => {
-    localStorage.setItem("pixie-system-prompt", systemPrompt);
+    updateConfig({ systemPrompt });
   }, [systemPrompt]);
 
   useEffect(() => {
-    localStorage.setItem("pixie-engine-model-configs", JSON.stringify(engineModelConfigs));
+    updateConfig({ engineModelConfigs });
   }, [engineModelConfigs]);
 
   // Load skills for the skills picker: user-level always, project-level when a
@@ -530,4 +505,30 @@ export default function App() {
       )}
     </div>
   );
+}
+
+/** Outer shell: load/migrate persisted state from disk before mounting AppShell.
+ *  The real tree (including useChat, which seeds React state from getConfig()/
+ *  getHistory()) only mounts once bootstrap() has resolved, so those reads see
+ *  populated data instead of defaults. Shows the splash while loading. */
+export default function App() {
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    bootstrap()
+      .then(() => {
+        if (alive) setReady(true);
+      })
+      .catch((e) => {
+        // Don't hang on the splash forever — proceed with defaults so the app
+        // is usable even if disk I/O fails.
+        console.error("[storage] bootstrap failed", e);
+        if (alive) setReady(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  if (!ready) return <SplashScreen />;
+  return <AppShell />;
 }
