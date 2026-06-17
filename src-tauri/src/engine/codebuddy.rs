@@ -11,7 +11,7 @@ const CODEBUDDY_BINARY_NAMES: &[&str] = &["codebuddy", "cbc"];
 /// Env-var prefixes forwarded to the CodeBuddy process (auth/config + model).
 const ENV_PREFIXES: &[&str] = &["CODEBUDDY_", "CBC_"];
 
-async fn collect_env() -> HashMap<String, String> {
+pub async fn collect_env() -> HashMap<String, String> {
     shared::collect_env("codebuddy", ENV_PREFIXES, shared::ENV_EXACT).await
 }
 
@@ -78,15 +78,12 @@ pub async fn check_available() -> EngineStatus {
 /// clean NDJSON and streaming still works.
 fn base_stream_args() -> Vec<String> {
     vec![
-        "--disallowedTools".into(),
-        // AskUserQuestion cannot be answered in headless mode; blocking it
-        // keeps a run from hanging on a prompt nobody can see.
-        "AskUserQuestion".into(),
         "--print".into(),
         "--output-format".into(),
         "stream-json".into(),
         "--include-partial-messages".into(),
-        "--dangerously-skip-permissions".into(),
+        "--permission-mode".into(),
+        "bypassPermissions".into(),
     ]
 }
 

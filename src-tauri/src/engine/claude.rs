@@ -20,7 +20,7 @@ const ENV_PREFIXES: &[&str] = &[
     "AZURE_",
 ];
 
-async fn collect_env() -> HashMap<String, String> {
+pub async fn collect_env() -> HashMap<String, String> {
     shared::collect_env("claude", ENV_PREFIXES, shared::ENV_EXACT).await
 }
 
@@ -118,6 +118,8 @@ async fn spawn_with_args(args: Vec<String>, message: &str, cwd: Option<&str>) ->
     cmd.spawn().context("failed to spawn claude process")
 }
 
+/// Spawn an interactive Claude process. Uses `--permission-mode bypassPermissions`
+/// so tool calls execute without per-call approval (AskUserQuestion still works).
 pub async fn spawn_single(
     conversation_id: &str,
     message: &str,
@@ -127,13 +129,11 @@ pub async fn spawn_single(
         vec![
             "--session-id".into(),
             conversation_id.into(),
-            "--disallowedTools".into(),
-            "AskUserQuestion".into(),
             "--print".into(),
             "--output-format".into(),
             "stream-json".into(),
-            "--verbose".into(),
-            "--dangerously-skip-permissions".into(),
+            "--permission-mode".into(),
+            "bypassPermissions".into(),
         ],
         message,
         cwd,
@@ -150,12 +150,34 @@ pub async fn spawn_continue(
         vec![
             "--resume".into(),
             conversation_id.into(),
+            "--print".into(),
+            "--output-format".into(),
+            "stream-json".into(),
+            "--permission-mode".into(),
+            "bypassPermissions".into(),
+        ],
+        message,
+        cwd,
+    )
+    .await
+}
+
+/// Spawn a headless (auto-approved) Claude process for scheduled tasks.
+/// Uses `--dangerously-skip-permissions` because there is no user to approve.
+pub async fn spawn_headless(
+    conversation_id: &str,
+    message: &str,
+    cwd: Option<&str>,
+) -> Result<Child> {
+    spawn_with_args(
+        vec![
+            "--session-id".into(),
+            conversation_id.into(),
             "--disallowedTools".into(),
             "AskUserQuestion".into(),
             "--print".into(),
             "--output-format".into(),
             "stream-json".into(),
-            "--verbose".into(),
             "--dangerously-skip-permissions".into(),
         ],
         message,
@@ -250,6 +272,16 @@ enum ClaudeStreamEvent {
         #[serde(default)]
         content: Option<String>,
     },
+
+    #[serde(rename = "permission_request")]
+    PermissionRequest {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        tool_name: Option<String>,
+        #[serde(default)]
+        input: Option<serde_json::Value>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -290,6 +322,7 @@ fn event_type_label(evt: &ClaudeStreamEvent) -> &'static str {
         ClaudeStreamEvent::User { .. } => "user",
         ClaudeStreamEvent::ToolUse { .. } => "tool_use",
         ClaudeStreamEvent::ToolResult { .. } => "tool_result",
+        ClaudeStreamEvent::PermissionRequest { .. } => "permission_request",
     }
 }
 
@@ -596,6 +629,15 @@ pub fn parse_line(line: &str) -> Vec<NormalizedEvent> {
         } else if matches!(evt, ClaudeStreamEvent::Error { .. }) {
             out.push(NormalizedEvent::Error { message: text });
         }
+    }
+
+    // Permission request: the agent wants to run a tool and needs user approval.
+    if let ClaudeStreamEvent::PermissionRequest { id, tool_name, input } = &evt {
+        out.push(NormalizedEvent::PermissionRequest {
+            id: id.clone().unwrap_or_default(),
+            tool_name: tool_name.clone().unwrap_or_default(),
+            input: input.clone().unwrap_or(serde_json::Value::Null),
+        });
     }
 
     out

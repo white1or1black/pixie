@@ -3,12 +3,14 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
-import type { Message, MessageUsage, PreviewRequest, ToolStep } from "../types";
+import type { Message, MessageUsage, PreviewRequest, ToolStep, PendingPermission } from "../types";
 import { isPreviewableFile } from "../preview";
 
 interface MessageBubbleProps {
   message: Message;
   onOpenPreview: (t: PreviewRequest) => void;
+  onRespondPermission?: (convId: string, requestId: string, allow: boolean) => void;
+  conversationId?: string;
 }
 
 function CopyButton({ text }: { text: string }) {
@@ -488,6 +490,74 @@ function ToolActivity({ tools, onOpenPreview }: { tools: ToolStep[]; onOpenPrevi
   );
 }
 
+// ---------------------------------------------------------------------------
+// Permission request card
+// ---------------------------------------------------------------------------
+
+/** Describe a tool permission request for display. */
+function describePermissionRequest(perm: PendingPermission): { label: string; detail?: string } {
+  const n = perm.toolName.toLowerCase();
+  const input = perm.input as Record<string, unknown> | null;
+  const pick = (...keys: string[]): string | undefined => {
+    for (const k of keys) {
+      const v = input?.[k];
+      if (typeof v === "string" && v.trim()) return v;
+    }
+    return undefined;
+  };
+
+  switch (n) {
+    case "bash": return { label: "Run command", detail: pick("command") };
+    case "edit": case "multiedit": return { label: "Edit file", detail: pick("file_path") };
+    case "write": return { label: "Write file", detail: pick("file_path") };
+    case "read": return { label: "Read file", detail: pick("file_path") };
+    case "askuserquestion": return { label: "Ask question", detail: pick("question") };
+    default: return { label: perm.toolName };
+  }
+}
+
+function PermissionCard({
+  perm,
+  onRespond,
+}: {
+  perm: PendingPermission;
+  onRespond: (requestId: string, allow: boolean) => void;
+}) {
+  const { label, detail } = describePermissionRequest(perm);
+  const input = perm.input as Record<string, unknown> | null;
+  return (
+    <div className="permission-card">
+      <div className="permission-card-header">
+        <span className="permission-icon">🔒</span>
+        <span className="permission-label">{label}</span>
+        {detail && <span className="permission-detail">{detail.length > 120 ? detail.slice(0, 120) + " …" : detail}</span>}
+      </div>
+      {perm.toolName.toLowerCase() === "bash" && input?.command && typeof input.command === "string" ? (
+        <pre className="permission-command">{input.command}</pre>
+      ) : null}
+      {perm.toolName.toLowerCase() === "askuserquestion" && input?.question && typeof input.question === "string" ? (
+        <p className="permission-question">{input.question}</p>
+      ) : null}
+      <div className="permission-actions">
+        <button
+          className="permission-btn permission-btn--deny"
+          onClick={() => onRespond(perm.requestId, false)}
+          type="button"
+        >
+          Deny
+        </button>
+        <button
+          className="permission-btn permission-btn--allow"
+          onClick={() => onRespond(perm.requestId, true)}
+          type="button"
+        >
+          Allow
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ThinkingCard({ message }: { message: Message }) {
   const [open, setOpen] = useState(false);
   const hasRunningTool = (message.tools ?? []).some((t) => t.status === "running");
@@ -591,7 +661,7 @@ function UsageStats({ usage }: { usage: MessageUsage }) {
   );
 }
 
-function MessageBubbleImpl({ message, onOpenPreview }: MessageBubbleProps) {
+function MessageBubbleImpl({ message, onOpenPreview, onRespondPermission, conversationId }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const isStreamingAssistant = !isUser && message.status === "streaming";
   const time = isUser
@@ -689,6 +759,18 @@ function MessageBubbleImpl({ message, onOpenPreview }: MessageBubbleProps) {
           <>
             {message.tools && message.tools.length > 0 && (
               <ToolActivity tools={message.tools} onOpenPreview={onOpenPreview} />
+            )}
+
+            {message.pendingPermissions && message.pendingPermissions.length > 0 && conversationId && onRespondPermission && (
+              <div className="permission-requests">
+                {message.pendingPermissions.map((perm) => (
+                  <PermissionCard
+                    key={perm.requestId}
+                    perm={perm}
+                    onRespond={(requestId, allow) => onRespondPermission(conversationId, requestId, allow)}
+                  />
+                ))}
+              </div>
             )}
 
             <ThinkingCard message={message} />

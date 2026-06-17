@@ -2,6 +2,7 @@ pub mod claude;
 pub mod codebuddy;
 pub mod cursor;
 mod shared;
+pub mod persistent;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -111,6 +112,12 @@ pub enum NormalizedEvent {
     Error {
         message: String,
     },
+    /// The agent is requesting permission to run a tool (e.g. Bash command).
+    PermissionRequest {
+        id: String,
+        tool_name: String,
+        input: serde_json::Value,
+    },
 }
 
 impl NormalizedEvent {
@@ -218,6 +225,21 @@ pub async fn spawn_single(
         "codebuddy" => codebuddy::spawn_single(session_id, message, cwd).await,
         "cursor" => cursor::spawn_single(session_id, message, cwd).await,
         other => anyhow::bail!("unknown engine: {other}"),
+    }
+}
+
+/// Spawn a headless (auto-approved) agent process for scheduled tasks.
+/// Uses `--dangerously-skip-permissions` because there is no user to approve.
+pub async fn spawn_headless(
+    engine_id: &str,
+    session_id: &str,
+    message: &str,
+    cwd: Option<&str>,
+) -> Result<Child> {
+    match engine_id {
+        "claude" => claude::spawn_headless(session_id, message, cwd).await,
+        // CodeBuddy/Cursor fall back to their regular spawn_single for now.
+        other => spawn_single(other, session_id, message, cwd).await,
     }
 }
 

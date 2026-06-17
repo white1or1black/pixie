@@ -31,6 +31,15 @@ export interface Message {
   usage?: MessageUsage;
   thinkingTokens?: number;
   thinking?: string;
+  /** Pending permission requests from the agent (tool calls needing user approval). */
+  pendingPermissions?: PendingPermission[];
+}
+
+/** A pending permission request from the agent. */
+export interface PendingPermission {
+  requestId: string;
+  toolName: string;
+  input: unknown;
 }
 
 export interface Conversation {
@@ -111,6 +120,17 @@ export interface ResponseThinkingText {
 export interface ResponseError {
   conversation_id: string;
   error: string;
+}
+
+/** Permission request from the agent (it wants to run a tool and needs user approval). */
+export interface ResponsePermissionRequest {
+  conversation_id: string;
+  /** Unique ID of the permission request (from the CLI). */
+  request_id: string;
+  /** Tool name (e.g. "Bash", "Edit", "Write"). */
+  tool_name: string;
+  /** Tool input as a JSON value. */
+  input: unknown;
 }
 
 export interface WorkspaceInfo {
