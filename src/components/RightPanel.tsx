@@ -7,6 +7,7 @@ import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import type { FileEntry, PreviewTarget, DiffViewMode } from "../types";
 import { getExtension, PREVIEW_EXTENSIONS, IMAGE_EXTENSIONS, basename } from "../preview";
 import { languageFromExt } from "../lib/languages";
+import { useDragRegion } from "../hooks/useDragRegion";
 import DiffViewer from "./DiffViewer";
 import Terminal from "./Terminal";
 
@@ -122,6 +123,7 @@ function RightPanelImpl({ workspacePath, previewTarget }: RightPanelProps) {
   const [history, setHistory] = useState<string[]>([]);
   const [width, setWidth] = useState(DEFAULT_WIDTH);
   const isResizing = useRef(false);
+  const handleDragRegion = useDragRegion();
 
   // Preview state
   const [previewFile, setPreviewFile] = useState<FileEntry | null>(null);
@@ -303,7 +305,7 @@ function RightPanelImpl({ workspacePath, previewTarget }: RightPanelProps) {
       <div className="flex-1 flex flex-col bg-[var(--bg-secondary)] border-l border-[var(--border-color)] min-w-0">
         {/* Header + Tabs. No in-panel close button — the header toolbar toggles
             the whole panel, so an X here would be redundant. */}
-        <div className="shrink-0 border-b border-[var(--border-color)]">
+        <div className="shrink-0 border-b border-[var(--border-color)]" onMouseDown={handleDragRegion}>
           <div className="flex items-center px-4 py-2">
             <div className="flex gap-1">
               {([
