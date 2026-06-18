@@ -1,11 +1,13 @@
-import { memo, useState, useEffect, useCallback, useRef, type CSSProperties } from "react";
+import { memo, useState, useEffect, useCallback, useMemo, useRef, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
-import type { FileEntry, PreviewTarget } from "../types";
+import type { FileEntry, PreviewTarget, DiffViewMode } from "../types";
 import { getExtension, PREVIEW_EXTENSIONS, IMAGE_EXTENSIONS, basename } from "../preview";
+import { languageFromExt } from "../lib/languages";
+import DiffViewer from "./DiffViewer";
 import Terminal from "./Terminal";
 
 interface RightPanelProps {
@@ -24,25 +26,11 @@ const CODE_EXTENSIONS = new Set([
 const MIN_WIDTH = 200;
 const DEFAULT_WIDTH = 320;
 
-function languageFromExt(ext: string): string {
-  const map: Record<string, string> = {
-    js: "javascript", jsx: "jsx", ts: "typescript", tsx: "tsx",
-    rs: "rust", py: "python", rb: "ruby", go: "go", java: "java",
-    c: "c", cpp: "cpp", h: "c", hpp: "cpp", php: "php",
-    css: "css", scss: "scss", less: "less", html: "html", htm: "html",
-    json: "json", yaml: "yaml", yml: "yaml", toml: "toml", xml: "xml",
-    sql: "sql", graphql: "graphql", sh: "bash", bash: "bash",
-    zsh: "bash", fish: "fish", vue: "vue", svelte: "svelte",
-  };
-  return map[ext] ?? ext;
-}
-
 // Hoisted to module scope for stable identity across renders — a prerequisite
 // for the memo()d highlighters below to skip re-tokenizing large content when
 // the panel re-renders for an unrelated reason (e.g. dragging the resize
 // handle, which flips `width` state ~60×/s, or re-selecting a git commit).
 const PREVIEW_CODE_STYLE: CSSProperties = { margin: 0, borderRadius: 0, fontSize: "0.75rem", flex: 1 };
-const DIFF_CODE_STYLE: CSSProperties = { margin: 0, borderRadius: 0, fontSize: "0.7rem" };
 const MD_CODE_STYLE: CSSProperties = { margin: 0, borderRadius: "0.5rem", fontSize: "0.75rem" };
 const REMARK_PLUGINS = [remarkGfm];
 
@@ -107,6 +95,25 @@ const MarkdownView = memo(function MarkdownView({ content }: { content: string }
   );
 });
 
+// Unified/split toggle shared by the Changes and commit-diff viewers.
+function DiffModeToggle({ mode, onChange }: { mode: DiffViewMode; onChange: (m: DiffViewMode) => void }) {
+  return (
+    <div className="flex items-center rounded bg-[var(--bg-tertiary)] p-0.5">
+      {(["unified", "split"] as DiffViewMode[]).map((m) => (
+        <button
+          key={m}
+          onClick={() => onChange(m)}
+          className={`px-1.5 py-0.5 rounded text-[10px] capitalize transition-colors ${
+            mode === m ? "bg-[var(--accent)] text-white" : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+          }`}
+        >
+          {m}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function RightPanelImpl({ workspacePath, previewTarget }: RightPanelProps) {
   const [tab, setTab] = useState<Tab>("files");
   const [currentPath, setCurrentPath] = useState(workspacePath);
@@ -127,6 +134,10 @@ function RightPanelImpl({ workspacePath, previewTarget }: RightPanelProps) {
   const [gitLoading, setGitLoading] = useState(false);
   const [selectedCommit, setSelectedCommit] = useState<string | null>(null);
   const [gitDiff, setGitDiff] = useState("");
+  // Uncommitted working-tree diff (`git diff HEAD`), rendered at the top of the git tab.
+  const [gitWorkingDiff, setGitWorkingDiff] = useState("");
+  const [diffViewMode, setDiffViewMode] = useState<DiffViewMode>("unified");
+  const [changesCollapsed, setChangesCollapsed] = useState(false);
 
   // Workspaces whose terminal has been opened at least once. Each gets a
   // permanently-mounted Terminal (its own PTY) so scrollback and any running
@@ -150,19 +161,38 @@ function RightPanelImpl({ workspacePath, previewTarget }: RightPanelProps) {
 
   useEffect(() => { loadDirectory(currentPath); }, [currentPath, loadDirectory]);
 
-  // Load git data when git tab is active
-  useEffect(() => {
-    if (tab !== "git") return;
+  // Load git data (status, log, and the uncommitted working-tree diff) when the
+  // git tab is active. Exposed as `loadGit` so the Changes header can refresh on
+  // demand — the working tree changes as the user works.
+  const loadGit = useCallback(async () => {
     setGitLoading(true);
-    Promise.all([
+    const [status, log, workingDiff] = await Promise.all([
       invoke<string>("git_status", { path: workspacePath }).catch(() => "Not a git repository"),
       invoke<string>("git_log", { path: workspacePath, count: 30 }).catch(() => ""),
-    ]).then(([status, log]) => {
-      setGitStatus(status);
-      setGitLog(log);
-      setGitLoading(false);
-    });
-  }, [tab, workspacePath]);
+      invoke<string>("git_diff", { path: workspacePath, commit: "HEAD" }).catch(() => ""),
+    ]);
+    setGitStatus(status);
+    setGitLog(log);
+    setGitWorkingDiff(workingDiff);
+    setGitLoading(false);
+  }, [workspacePath]);
+
+  useEffect(() => {
+    if (tab !== "git") return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- legitimate: fetch git data when the tab becomes active
+    loadGit();
+  }, [tab, loadGit]);
+
+  // Untracked files aren't covered by `git diff HEAD`; surface them separately.
+  const untracked = useMemo(
+    () =>
+      gitStatus
+        .split("\n")
+        .filter((l) => l.startsWith("?? "))
+        .map((l) => l.slice(3).trim())
+        .filter(Boolean),
+    [gitStatus],
+  );
 
   const openPreview = useCallback(async (entry: FileEntry) => {
     const ext = getExtension(entry.name);
@@ -208,6 +238,7 @@ function RightPanelImpl({ workspacePath, previewTarget }: RightPanelProps) {
     setPreviewContent(null);
     setSelectedCommit(null);
     setGitDiff("");
+    setGitWorkingDiff("");
     /* eslint-enable react-hooks/set-state-in-effect */
   }, [workspacePath]);
 
@@ -427,12 +458,55 @@ function RightPanelImpl({ workspacePath, previewTarget }: RightPanelProps) {
               </div>
             ) : (
               <>
-                {/* Git Status */}
-                <div className="border-b border-[var(--border-color)] shrink-0">
-                  <div className="px-3 py-1.5 text-[11px] font-semibold text-[var(--text-secondary)]">Status</div>
-                  <pre className="px-3 pb-2 text-xs font-mono text-[var(--text-primary)] whitespace-pre-wrap leading-relaxed">
-                    {gitStatus || "Clean working tree"}
-                  </pre>
+                {/* Working-tree (uncommitted) changes — the "new changes", rendered
+                    in the same DiffViewer as commit diffs. */}
+                <div className="border-b border-[var(--border-color)] shrink-0 flex flex-col min-h-0">
+                  <div className="flex items-center justify-between px-3 py-1.5 shrink-0">
+                    <button
+                      onClick={() => setChangesCollapsed((c) => !c)}
+                      className="flex items-center gap-1.5"
+                    >
+                      <span
+                        className="text-[10px] text-[var(--text-secondary)]"
+                        style={{ transform: changesCollapsed ? "rotate(-90deg)" : "none", transition: "transform 0.15s" }}
+                      >
+                        ▾
+                      </span>
+                      <span className="text-[11px] font-semibold text-[var(--text-secondary)]">Changes</span>
+                    </button>
+                    <div className="flex items-center gap-2">
+                      <DiffModeToggle mode={diffViewMode} onChange={setDiffViewMode} />
+                      <button
+                        onClick={loadGit}
+                        title="Refresh"
+                        className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)] transition-colors"
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M21 12a9 9 0 1 1-3-6.7" />
+                          <path d="M21 3v6h-6" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                  {!changesCollapsed && (
+                    <div className="overflow-auto max-h-[45%]">
+                      {gitWorkingDiff ? (
+                        <DiffViewer diff={gitWorkingDiff} viewMode={diffViewMode} />
+                      ) : (
+                        <p className="px-3 pb-2 text-xs text-[var(--text-secondary)]">No uncommitted changes</p>
+                      )}
+                      {untracked.length > 0 && (
+                        <div className="border-t border-[var(--border-color)]">
+                          <div className="px-3 py-1 text-[10px] text-[var(--text-secondary)]">Untracked</div>
+                          {untracked.map((f, i) => (
+                            <div key={i} className="px-3 py-0.5 text-[11px] font-mono text-[var(--text-secondary)] truncate">
+                              + {f}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
                 {/* Git Log */}
                 <div className="flex-1 overflow-y-auto">
@@ -458,20 +532,19 @@ function RightPanelImpl({ workspacePath, previewTarget }: RightPanelProps) {
                 </div>
                 {/* Diff */}
                 {gitDiff && (
-                  <div className="border-t border-[var(--border-color)] max-h-[40%] overflow-auto shrink-0">
-                    <div className="flex items-center justify-between px-3 py-1.5 sticky top-0 bg-[var(--bg-secondary)]">
+                  <div className="border-t border-[var(--border-color)] max-h-[55%] overflow-auto shrink-0 flex flex-col">
+                    <div className="flex items-center justify-between px-3 py-1.5 sticky top-0 z-10 bg-[var(--bg-secondary)] border-b border-[var(--border-color)]">
                       <span className="text-[11px] font-semibold text-[var(--text-secondary)]">
                         Diff {selectedCommit?.slice(0, 7)}
                       </span>
                       <button onClick={() => { setSelectedCommit(null); setGitDiff(""); }}
                         className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)] transition-colors">
-                        <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-                          <path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                        </svg>
-                      </button>
+                          <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                            <path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                          </svg>
+                        </button>
                     </div>
-                    <CodeBlock code={gitDiff} language="diff" showLineNumbers={false}
-                      customStyle={DIFF_CODE_STYLE} />
+                    <DiffViewer diff={gitDiff} viewMode={diffViewMode} />
                   </div>
                 )}
               </>

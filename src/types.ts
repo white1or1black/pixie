@@ -306,3 +306,53 @@ export interface TaskRunRecord {
   finished_at: string;
 }
 
+// ---------------------------------------------------------------------------
+// Structured git diff (parsed from raw `git diff` unified output)
+// ---------------------------------------------------------------------------
+
+export type DiffLineType = "context" | "add" | "delete";
+
+export interface DiffLine {
+  type: DiffLineType;
+  /** Line content with the leading +/-/space prefix already stripped. */
+  text: string;
+  /** 1-based line number in the NEW file (undefined on pure deletions). */
+  newNumber?: number;
+  /** 1-based line number in the OLD file (undefined on pure additions). */
+  oldNumber?: number;
+  /** True when the original line had no trailing newline ("\ No newline..."). */
+  noNewline?: boolean;
+}
+
+export interface DiffHunk {
+  /** Header, e.g. "@@ -10,5 +10,7 @@". */
+  header: string;
+  lines: DiffLine[];
+}
+
+export type DiffFileStatus = "added" | "modified" | "deleted" | "renamed";
+
+export interface DiffFile {
+  /** Display path (the new path, or the old path for deletions). */
+  path: string;
+  /** Previous path when the file was renamed/moved. */
+  oldPath?: string;
+  status: DiffFileStatus;
+  /** True for binary changes (no textual hunks). */
+  binary: boolean;
+  hunks: DiffHunk[];
+  /** Added line count across all hunks. */
+  additions: number;
+  /** Removed line count across all hunks. */
+  deletions: number;
+}
+
+export interface ParsedDiff {
+  files: DiffFile[];
+  /** True when no `diff --git` blocks could be parsed. */
+  empty: boolean;
+}
+
+/** Render mode for the diff viewer. */
+export type DiffViewMode = "unified" | "split";
+

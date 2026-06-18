@@ -948,8 +948,10 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
           }
           return { ...conv, messages: msgs };
         }, convIndexRef),
-    [],
-  );
+    );
+  },
+  [],
+);
 
   const clearError = useCallback(() => { setError(null); }, []);
 
