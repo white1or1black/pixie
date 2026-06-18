@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef } from "react";
+import { useState, useMemo, useEffect, useRef, memo } from "react";
 import type { ConversationEntry } from "../hooks/useChat";
 import type { WorkspaceState, AgentEngineId, EngineStatus } from "../types";
 import { useDragRegion } from "../hooks/useDragRegion";
@@ -61,7 +61,7 @@ function sortEntries(entries: ConversationEntry[], generatingIds: Set<string>): 
   });
 }
 
-function ConversationRow({
+const ConversationRow = memo(function ConversationRow({
   entry,
   workspaceLabel,
   isActive,
@@ -170,7 +170,7 @@ function ConversationRow({
       </button>
     </div>
   );
-}
+});
 
 function SectionHeader({
   label,

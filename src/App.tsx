@@ -1,15 +1,20 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, lazy, Suspense } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useDragRegion } from "./hooks/useDragRegion";
 import Sidebar from "./components/Sidebar";
-import ChatView from "./components/ChatView";
 import InputBar from "./components/InputBar";
-import Settings from "./components/Settings";
-import MarketplacePanel from "./components/MarketplacePanel";
-import ScheduledTasksPanel from "./components/ScheduledTasksPanel";
-import FileExplorer from "./components/RightPanel";
 import { openExternal } from "./openExternal";
 import { useChat } from "./hooks/useChat";
+
+// Lazy-load heavy panels that aren't needed on initial render or during
+// workspace/conversation switches.  React renders the fallback (loading
+// indicator) immediately, giving the user a responsive feel while the chunk
+// loads or the component re-mounts after a workspace switch.
+const ChatView = lazy(() => import("./components/ChatView"));
+const Settings = lazy(() => import("./components/Settings"));
+const MarketplacePanel = lazy(() => import("./components/MarketplacePanel"));
+const ScheduledTasksPanel = lazy(() => import("./components/ScheduledTasksPanel"));
+const FileExplorer = lazy(() => import("./components/RightPanel"));
 import { useScheduledTasks } from "./hooks/useScheduledTasks";
 import type {
   EngineModelConfigs,
@@ -24,6 +29,15 @@ import { bootstrap, getConfig, updateConfig } from "./lib/storage";
 
 // Brand mark — same art as the app/README icon.
 const iconUrl = new URL("./assets/icon.svg", import.meta.url).href;
+
+/** Lightweight loading indicator shown while lazy-loaded panels mount. */
+function LoadingPanel() {
+  return (
+    <div className="flex items-center justify-center flex-1 h-full">
+      <div className="w-5 h-5 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" />
+    </div>
+  );
+}
 
 function SplashScreen() {
   return (
@@ -422,7 +436,9 @@ function AppShell() {
               </div>
             )}
 
-            <ChatView conversation={activeConversation} isGenerating={isGenerating} onOpenPreview={handleOpenPreview} onRespondPermission={respondPermission} />
+            <Suspense fallback={<LoadingPanel />}>
+              <ChatView conversation={activeConversation} isGenerating={isGenerating} onOpenPreview={handleOpenPreview} onRespondPermission={respondPermission} />
+            </Suspense>
 
             <InputBar
               onSend={sendMessage}
@@ -444,6 +460,7 @@ function AppShell() {
         )}
 
         {mainView === "tasks" && (
+          <Suspense fallback={<LoadingPanel />}>
           <ScheduledTasksPanel
             workspaces={workspaces}
             tasks={scheduledTasks}
@@ -471,16 +488,20 @@ function AppShell() {
             }}
             onClose={() => setMainView("chat")}
           />
+          </Suspense>
         )}
 
         {mainView === "skills" && (
+          <Suspense fallback={<LoadingPanel />}>
           <MarketplacePanel
             onClose={() => setMainView("chat")}
             onSkillsChanged={reloadSkills}
           />
+          </Suspense>
         )}
 
         {mainView === "settings" && (
+          <Suspense fallback={<LoadingPanel />}>
           <Settings
             engineStatuses={engineStatuses}
             onRefreshStatus={refreshEngineStatuses}
@@ -497,6 +518,7 @@ function AppShell() {
             onPickDefaultWorkspace={handlePickDefaultWorkspace}
             onResetDefaultWorkspace={handleResetDefaultWorkspace}
           />
+          </Suspense>
         )}
       </div>
 
@@ -506,10 +528,12 @@ function AppShell() {
           inside it also persist across workspace switches. */}
       {activeWorkspace?.path && (
         <div className="h-full" style={{ display: fileExplorerOpen ? "block" : "none" }}>
+          <Suspense fallback={<LoadingPanel />}>
           <FileExplorer
             workspacePath={activeWorkspace.path}
             previewTarget={previewTarget}
           />
+          </Suspense>
         </div>
       )}
     </div>

@@ -48,21 +48,20 @@ function generateTitle(content: string): string {
 }
 
 function findWorkspaceForConversation(
-  all: Record<string, Conversation[]>,
+  _all: Record<string, Conversation[]>,
   convId: string,
+  indexRef: React.RefObject<Map<string, string>>,
 ): string | null {
-  for (const [wsId, convs] of Object.entries(all)) {
-    if (convs.some((c) => c.id === convId)) return wsId;
-  }
-  return null;
+  return indexRef.current?.get(convId) ?? null;
 }
 
 function patchConversation(
   prev: Record<string, Conversation[]>,
   convId: string,
   updater: (conv: Conversation) => Conversation,
+  indexRef: React.RefObject<Map<string, string>>,
 ): Record<string, Conversation[]> {
-  const wsId = findWorkspaceForConversation(prev, convId);
+  const wsId = findWorkspaceForConversation(prev, convId, indexRef);
   if (!wsId) return prev;
   return {
     ...prev,
@@ -162,6 +161,7 @@ function applyStreamBatch(
   prev: Record<string, Conversation[]>,
   convId: string,
   batch: StreamBatch,
+  indexRef: React.RefObject<Map<string, string>>,
 ): Record<string, Conversation[]> {
   return patchConversation(prev, convId, (conv) => {
     const msgs = [...conv.messages];
@@ -272,6 +272,8 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
   const unlistenRefs = useRef<Array<() => void>>([]);
   const activeIdRef = useRef<string | null>(activeId);
   const allConversationsRef = useRef(allConversations);
+  /** Reverse index: conversationId → workspaceId for O(1) lookups. */
+  const convIndexRef = useRef<Map<string, string>>(new Map());
   const streamBatchesRef = useRef(new Map<string, StreamBatch>());
   const streamFlushScheduledRef = useRef(false);
   // Timestamp of the last streamed UI flush, for rate-limiting (see below).
@@ -307,7 +309,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
       setAllConversations((prev) => {
         let next = prev;
         for (const [convId, batch] of toFlush) {
-          next = applyStreamBatch(next, convId, batch);
+          next = applyStreamBatch(next, convId, batch, convIndexRef);
         }
         return next;
       });
@@ -350,6 +352,14 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
 
   useEffect(() => {
     allConversationsRef.current = allConversations;
+    // Rebuild the convId → wsId index whenever conversations change.
+    const idx = convIndexRef.current;
+    idx.clear();
+    for (const [wsId, convs] of Object.entries(allConversations)) {
+      for (const c of convs) {
+        idx.set(c.id, wsId);
+      }
+    }
   }, [allConversations]);
 
   const activeWorkspace = useMemo(() => {
@@ -376,11 +386,13 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
 
   const activeConversation = useMemo(() => {
     if (!activeId) return null;
-    for (const { conversation } of unifiedConversations) {
-      if (conversation.id === activeId) return conversation;
-    }
-    return null;
-  }, [activeId, unifiedConversations]);
+    // O(1) lookup via index instead of scanning all conversations.
+    const wsId = convIndexRef.current.get(activeId);
+    if (!wsId) return null;
+    const convs = allConversations[wsId];
+    if (!convs) return null;
+    return convs.find((c) => c.id === activeId) ?? null;
+  }, [activeId, allConversations]);
 
   const isGenerating = activeId ? generatingIds.has(activeId) : false;
 
@@ -561,7 +573,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
               msgs[msgs.length - 1] = { ...last, content: done.full_text, status: "done", timestamp: Date.now() };
             }
             return { ...conv, messages: msgs, updatedAt: Date.now() };
-          }),
+          }, convIndexRef),
         );
         setGeneratingIds((prev) => {
           const next = new Set(prev);
@@ -584,7 +596,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
               msgs[msgs.length - 1] = { ...last, status: "error" };
             }
             return { ...conv, messages: msgs };
-          }),
+          }, convIndexRef),
         );
         setGeneratingIds((prev) => {
           const next = new Set(prev);
@@ -645,7 +657,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
               }
             }
             return { ...conv, messages: msgs };
-          }),
+          }, convIndexRef),
         );
       });
 
@@ -726,14 +738,14 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
 
   const switchConversation = useCallback((id: string, workspaceId?: string) => {
     const wsId =
-      workspaceId ?? findWorkspaceForConversation(allConversationsRef.current, id);
+      workspaceId ?? findWorkspaceForConversation(allConversationsRef.current, id, convIndexRef);
     if (wsId) setActiveWorkspaceId(wsId);
     setActiveId(id);
     setError(null);
   }, []);
 
   const renameConversation = useCallback((id: string, newTitle: string) => {
-    const wsId = findWorkspaceForConversation(allConversationsRef.current, id);
+    const wsId = findWorkspaceForConversation(allConversationsRef.current, id, convIndexRef);
     if (!wsId) return;
     setAllConversations((prev) => ({
       ...prev,
@@ -745,7 +757,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
   }, []);
 
   const setConversationModel = useCallback((id: string, model: string | undefined) => {
-    const wsId = findWorkspaceForConversation(allConversationsRef.current, id);
+    const wsId = findWorkspaceForConversation(allConversationsRef.current, id, convIndexRef);
     if (!wsId) return;
 
     // Update frontend state.
@@ -772,7 +784,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
 
   const deleteConversation = useCallback((id: string, workspaceId?: string) => {
     const wsId =
-      workspaceId ?? findWorkspaceForConversation(allConversationsRef.current, id);
+      workspaceId ?? findWorkspaceForConversation(allConversationsRef.current, id, convIndexRef);
     if (!wsId) return;
     setAllConversations((prev) => ({
       ...prev,
@@ -791,7 +803,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
 
       let convId = convIdOverride ?? activeId;
       let wsId = convId
-        ? findWorkspaceForConversation(allConversationsRef.current, convId)
+        ? findWorkspaceForConversation(allConversationsRef.current, convId, convIndexRef)
         : null;
 
       if (!convId) {
@@ -813,7 +825,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
       }
 
       if (!wsId) {
-        wsId = findWorkspaceForConversation(allConversationsRef.current, convId);
+        wsId = findWorkspaceForConversation(allConversationsRef.current, convId, convIndexRef);
       }
       if (!wsId) return;
 
@@ -880,7 +892,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
               msgs[msgs.length - 1] = { ...last, status: "error" };
             }
             return { ...conv, messages: msgs };
-          }),
+          }, convIndexRef),
         );
       }
     },
@@ -906,7 +918,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
           msgs[msgs.length - 1] = { ...last, status: "done", timestamp: Date.now() };
         }
         return { ...conv, messages: msgs };
-      }),
+      }, convIndexRef),
     );
   }, [activeId]);
 
@@ -935,9 +947,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
             };
           }
           return { ...conv, messages: msgs };
-        }),
-      );
-    },
+        }, convIndexRef),
     [],
   );
 
