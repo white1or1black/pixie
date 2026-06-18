@@ -704,7 +704,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
     } catch { /* ignore */ }
   }, []);
 
-  const createConversation = useCallback((workspaceId?: string, engine?: AgentEngineId) => {
+  const createConversation = useCallback((workspaceId?: string, engine?: AgentEngineId, model?: string) => {
     const wsId = workspaceId ?? resolveTargetWorkspace();
     if (!wsId) return "";
     const id = generateId();
@@ -712,6 +712,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
       id, title: "New Agent", messages: [],
       createdAt: Date.now(), updatedAt: Date.now(),
       engine: engine ?? defaultEngine,
+      model,
     };
     setAllConversations((prev) => ({
       ...prev,
@@ -741,6 +742,32 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
       ),
     }));
     // Title is persisted via the debounced history save (setHistory in the persist effect).
+  }, []);
+
+  const setConversationModel = useCallback((id: string, model: string | undefined) => {
+    const wsId = findWorkspaceForConversation(allConversationsRef.current, id);
+    if (!wsId) return;
+
+    // Update frontend state.
+    setAllConversations((prev) => ({
+      ...prev,
+      [wsId]: (prev[wsId] ?? []).map((c) =>
+        c.id === id ? { ...c, model } : c
+      ),
+    }));
+
+    // Notify the backend so it can update the model override and kill any
+    // existing persistent session (the next send_message will respawn with
+    // the new model).
+    const conv = allConversationsRef.current[wsId]?.find((c) => c.id === id);
+    const engine = conv?.engine;
+    invoke("update_conversation_model", {
+      conversationId: id,
+      model: model ?? null,
+      engine: engine ?? null,
+    }).catch((e) => {
+      console.error("[setConversationModel] backend call failed:", e);
+    });
   }, []);
 
   const deleteConversation = useCallback((id: string, workspaceId?: string) => {
@@ -818,6 +845,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
 
       const currentConv = allConversationsRef.current[wsId]?.find((c) => c.id === convId);
       const engine = currentConv?.engine ?? defaultEngine;
+      const convModel = currentConv?.model || undefined;
       // Only --resume when a prior turn completed successfully on the backend.
       // Using user-message count alone breaks retries: after a failed first
       // attempt (spawn error / no CodeBuddy session) we'd pass --resume and get
@@ -835,6 +863,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
           conversationId: convId,
           engine,
           isContinue,
+          model: convModel,
         });
       } catch (e) {
         setError(String(e));
@@ -1010,6 +1039,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
     createConversation,
     switchConversation,
     renameConversation,
+    setConversationModel,
     deleteConversation,
     sendMessage,
     stopGeneration,

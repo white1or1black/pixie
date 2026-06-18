@@ -126,6 +126,7 @@ function AppShell() {
     createConversation,
     switchConversation,
     renameConversation,
+    setConversationModel,
     deleteConversation,
     sendMessage,
     stopGeneration,
@@ -244,6 +245,10 @@ function AppShell() {
     },
     [],
   );
+
+  const handleModelChange = useCallback((model: string | undefined) => {
+    if (activeConversation) setConversationModel(activeConversation.id, model);
+  }, [activeConversation, setConversationModel]);
 
   const handlePickDefaultWorkspace = useCallback(async () => {
     try {
@@ -430,6 +435,10 @@ function AppShell() {
               textareaRef={composerRef}
               skills={skills}
               workspacePath={activeWorkspace?.path ?? null}
+              engine={activeConversation?.engine}
+              model={activeConversation?.model}
+              onModelChange={handleModelChange}
+              engineModelConfigs={engineModelConfigs}
             />
           </>
         )}

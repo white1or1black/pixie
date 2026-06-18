@@ -29,6 +29,73 @@ pub async fn get_codebuddy_version() -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Fetch available models from `codebuddy --help`.
+/// The `--model` option description lists supported models in parentheses.
+/// Note: `codebuddy --help` writes the model list to **stderr**, not stdout,
+/// so we capture both streams.
+pub async fn list_models() -> Vec<(String, String)> {
+    log::info!("[list_models] codebuddy: starting");
+    let binary = match find_codebuddy_binary() {
+        Ok(b) => b,
+        Err(e) => {
+            log::info!("[list_models] codebuddy: binary not found: {e}");
+            return vec![];
+        }
+    };
+    let env = collect_env().await;
+    let mut cmd = tokio::process::Command::new(&binary);
+    cmd.arg("--help");
+    for (k, v) in &env {
+        cmd.env(k, v);
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    shared::detach_from_controlling_terminal(&mut cmd);
+    log::info!("[list_models] codebuddy: spawning --help");
+    match tokio::time::timeout(std::time::Duration::from_secs(10), cmd.output()).await {
+        Ok(Ok(output)) => {
+            // codebuddy --help writes to both stdout and stderr; combine them.
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let combined = format!("{stdout}\n{stderr}");
+            let models = parse_model_list_from_help(&combined);
+            log::info!("[list_models] codebuddy: got {} models", models.len());
+            models
+        }
+        Ok(Err(e)) => {
+            log::warn!("[list_models] codebuddy: spawn error: {e}");
+            vec![]
+        }
+        Err(_) => {
+            log::warn!("[list_models] codebuddy: timed out after 10s");
+            vec![]
+        }
+    }
+}
+
+/// Parse model IDs from the `--model` help line.
+/// Format: `--model <model>  ... Currently supported: (id1, id2, id3)`
+fn parse_model_list_from_help(help: &str) -> Vec<(String, String)> {
+    for line in help.lines() {
+        if line.contains("--model") && (line.contains("Currently supported") || line.contains("supported:")) {
+            if let Some(start) = line.rfind('(') {
+                if let Some(end) = line[start..].find(')') {
+                    let inner = &line[start + 1..start + end];
+                    return inner
+                        .split(',')
+                        .filter_map(|s| {
+                            let id = s.trim().to_string();
+                            if id.is_empty() { None } else { Some((id.clone(), id)) }
+                        })
+                        .collect();
+                }
+            }
+        }
+    }
+    vec![]
+}
+
 pub async fn check_available() -> EngineStatus {
     match find_codebuddy_binary() {
         Ok(path) => {
@@ -93,13 +160,16 @@ fn base_stream_args() -> Vec<String> {
 /// session id to our conversation id; `--resume <id>` continues that session
 /// on later turns. This mirrors how the Claude engine is driven, so the shared
 /// session-id plumbing in `mod.rs` needs no special-casing for CodeBuddy.
-fn stream_args(session_id: &str, resume: bool, env: &HashMap<String, String>) -> Vec<String> {
+fn stream_args(session_id: &str, resume: bool, env: &HashMap<String, String>, model_override: Option<&str>) -> Vec<String> {
     let mut args = base_stream_args();
     args.push(if resume { "--resume" } else { "--session-id" }.into());
     args.push(session_id.to_string());
-    if let Some(model) = env.get("CODEBUDDY_MODEL").filter(|s| !s.is_empty()) {
+    // Per-conversation model override takes precedence over CODEBUDDY_MODEL env var.
+    let model = model_override.filter(|s| !s.is_empty())
+        .or_else(|| env.get("CODEBUDDY_MODEL").filter(|s| !s.is_empty()).map(String::as_str));
+    if let Some(model) = model {
         args.push("--model".into());
-        args.push(model.clone());
+        args.push(model.to_string());
     }
     args
 }
@@ -135,14 +205,14 @@ async fn spawn(
     cmd.spawn().context("failed to spawn codebuddy process")
 }
 
-pub async fn spawn_single(session_id: &str, message: &str, cwd: Option<&str>) -> Result<Child> {
+pub async fn spawn_single(session_id: &str, message: &str, cwd: Option<&str>, model: Option<&str>) -> Result<Child> {
     let env = collect_env().await;
-    spawn(stream_args(session_id, false, &env), message, cwd, &env).await
+    spawn(stream_args(session_id, false, &env, model), message, cwd, &env).await
 }
 
-pub async fn spawn_continue(session_id: &str, message: &str, cwd: Option<&str>) -> Result<Child> {
+pub async fn spawn_continue(session_id: &str, message: &str, cwd: Option<&str>, model: Option<&str>) -> Result<Child> {
     let env = collect_env().await;
-    spawn(stream_args(session_id, true, &env), message, cwd, &env).await
+    spawn(stream_args(session_id, true, &env, model), message, cwd, &env).await
 }
 
 // ---------------------------------------------------------------------------

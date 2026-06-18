@@ -3,7 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import SkillsDropdown from "./SkillsDropdown";
-import type { SkillEntry } from "../types";
+import type { SkillEntry, AgentEngineId, EngineModelConfigs, ModelEntry } from "../types";
+import { ENGINE_MODEL_ENV_KEY } from "../types";
 
 interface InputBarProps {
   onSend: (message: string) => void;
@@ -18,6 +19,14 @@ interface InputBarProps {
   /** Active workspace folder path (= Claude's CWD). Used to render @mentions
    *  relative to the project so they resolve cleanly. null when no workspace. */
   workspacePath?: string | null;
+  /** Engine of the active conversation. */
+  engine?: AgentEngineId;
+  /** Current model override for the active conversation. */
+  model?: string;
+  /** Called when the user picks a different model. */
+  onModelChange: (model: string | undefined) => void;
+  /** Global engine model configs (for showing default model label). */
+  engineModelConfigs: EngineModelConfigs;
 }
 
 const MAX_CHARS = 8000;
@@ -53,8 +62,15 @@ export default function InputBar({
   textareaRef,
   skills,
   workspacePath,
+  engine,
+  model,
+  onModelChange,
+  engineModelConfigs,
 }: InputBarProps) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
+  const [customModelInput, setCustomModelInput] = useState("");
+  const [availableModels, setAvailableModels] = useState<ModelEntry[]>([]);
   const [dragActive, setDragActive] = useState(false);
   /** Absolute file paths staged as attachments. On send these become @mentions
    *  appended to the message so Claude Code pulls them in as context. */
@@ -190,6 +206,44 @@ export default function InputBar({
     return () => document.removeEventListener("mousedown", onDown);
   }, [dropdownOpen]);
 
+  // Close the model dropdown when clicking outside of it.
+  useEffect(() => {
+    if (!modelDropdownOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setModelDropdownOpen(false);
+        setCustomModelInput("");
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [modelDropdownOpen]);
+
+  // Fetch available models lazily — only when the model dropdown opens.
+  const fetchModels = useCallback(() => {
+    if (!engine) return;
+    invoke<ModelEntry[]>("list_models", { engine })
+      .then((models) => {
+        setAvailableModels(models);
+      })
+      .catch(() => {
+        setAvailableModels([]);
+      });
+  }, [engine]);
+
+  useEffect(() => {
+    if (modelDropdownOpen && engine) {
+      setCustomModelInput("");
+      fetchModels();
+    }
+  }, [modelDropdownOpen, engine, fetchModels]);
+
+  const handleSelectModel = useCallback((modelId: string | undefined) => {
+    onModelChange(modelId);
+    setModelDropdownOpen(false);
+    setCustomModelInput("");
+  }, [onModelChange]);
+
   // Insert the picked skill's invocation ("/skill-name ") into the draft.
   const handleSelectSkill = useCallback((skill: SkillEntry) => {
     const inv = skill.invocation;
@@ -225,6 +279,63 @@ export default function InputBar({
               onSelect={handleSelectSkill}
               onClose={() => setDropdownOpen(false)}
             />
+          )}
+
+          {modelDropdownOpen && engine && (
+            <div className="absolute bottom-full right-4 mb-2 w-52 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg shadow-lg z-50 py-1 max-h-64 overflow-y-auto">
+              {/* Default option */}
+              <button
+                type="button"
+                onClick={() => handleSelectModel(undefined)}
+                className={`w-full text-left px-3 py-1.5 text-xs hover:bg-[var(--bg-tertiary)] transition-colors ${
+                  !model ? "text-[var(--accent)] font-medium" : "text-[var(--text-primary)]"
+                }`}
+              >
+                Default{engineModelConfigs[engine]?.[ENGINE_MODEL_ENV_KEY[engine]] ? ` (${engineModelConfigs[engine][ENGINE_MODEL_ENV_KEY[engine]]})` : ""}
+              </button>
+              {/* Presets */}
+              {availableModels.map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => handleSelectModel(m.id)}
+                  className={`w-full text-left px-3 py-1.5 text-xs hover:bg-[var(--bg-tertiary)] transition-colors ${
+                    model === m.id ? "text-[var(--accent)] font-medium" : "text-[var(--text-primary)]"
+                  }`}
+                >
+                  {m.label}
+                  {m.id !== m.label && <span className="ml-1.5 text-[var(--text-secondary)] opacity-60">{m.id}</span>}
+                </button>
+              ))}
+              {/* Custom model input */}
+              <div className="border-t border-[var(--border-color)] mt-1 pt-1 px-2">
+                <div className="flex items-center gap-1">
+                  <input
+                    type="text"
+                    value={customModelInput}
+                    onChange={(e) => setCustomModelInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && customModelInput.trim()) {
+                        e.preventDefault();
+                        handleSelectModel(customModelInput.trim());
+                      }
+                    }}
+                    placeholder="Custom model..."
+                    className="flex-1 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded px-2 py-1 text-[var(--text-primary)] placeholder:text-[var(--text-secondary)]/50 outline-none focus:border-[var(--accent)]"
+                    autoFocus
+                  />
+                  {customModelInput.trim() && (
+                    <button
+                      type="button"
+                      onClick={() => handleSelectModel(customModelInput.trim())}
+                      className="text-[10px] text-[var(--accent)] hover:underline shrink-0"
+                    >
+                      Apply
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
           )}
 
           {attachments.length > 0 && (
@@ -373,15 +484,51 @@ export default function InputBar({
         </div>
 
         <div className="flex justify-between items-center mt-1 px-1">
-          <span className="text-[10px] text-[var(--text-secondary)] opacity-60">
-            {isGenerating
-              ? "Generating..."
-              : dragActive
-                ? "Drop files to attach…"
-                : disabled
-                  ? (disabledHint ?? "")
-                  : ""}
-          </span>
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-[10px] text-[var(--text-secondary)] opacity-60">
+              {isGenerating
+                ? "Generating..."
+                : dragActive
+                  ? "Drop files to attach…"
+                  : disabled
+                    ? (disabledHint ?? "")
+                    : ""}
+            </span>
+            {engine && (
+              <button
+                type="button"
+                onClick={() => { if (!isGenerating) setModelDropdownOpen((v) => !v); }}
+                className={`flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded transition-colors ${
+                  model
+                    ? "text-[var(--accent)] bg-[var(--accent)]/10"
+                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
+                } ${isGenerating ? "opacity-50 cursor-not-allowed" : ""}`}
+                disabled={isGenerating}
+                title="Select model"
+              >
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="4" y="4" width="16" height="16" rx="2" />
+                  <rect x="9" y="9" width="6" height="6" />
+                  <line x1="9" y1="2" x2="9" y2="4" />
+                  <line x1="15" y1="2" x2="15" y2="4" />
+                  <line x1="9" y1="20" x2="9" y2="22" />
+                  <line x1="15" y1="20" x2="15" y2="22" />
+                  <line x1="2" y1="9" x2="4" y2="9" />
+                  <line x1="2" y1="15" x2="4" y2="15" />
+                  <line x1="20" y1="9" x2="22" y2="9" />
+                  <line x1="20" y1="15" x2="22" y2="15" />
+                </svg>
+                <span className="truncate max-w-[160px]">
+                  {model
+                    ? (availableModels.find((m) => m.id === model)?.label ?? model)
+                    : "Default"}
+                </span>
+                <svg width="8" height="8" viewBox="0 0 8 8" fill="currentColor" className="opacity-60">
+                  <path d="M0 2l4 4 4-4z" />
+                </svg>
+              </button>
+            )}
+          </div>
           {charCount > 0 && (
             <span
               className={`text-[10px] ${

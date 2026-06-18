@@ -38,6 +38,40 @@ pub async fn get_claude_version() -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// List known Claude models from environment variable configuration.
+/// Claude CLI doesn't have `--list-models`, so we read ANTHROPIC_MODEL and
+/// related env vars, plus provide well-known aliases.
+pub async fn list_models() -> Vec<(String, String)> {
+    log::info!("[list_models] claude: starting");
+    let mut models = vec![
+        ("sonnet".to_string(), "Sonnet (latest)".to_string()),
+        ("opus".to_string(), "Opus (latest)".to_string()),
+        ("haiku".to_string(), "Haiku (latest)".to_string()),
+        ("claude-sonnet-4-20250514".to_string(), "Sonnet 4".to_string()),
+        ("claude-opus-4-20250514".to_string(), "Opus 4".to_string()),
+        ("claude-haiku-3-5-20241022".to_string(), "Haiku 3.5".to_string()),
+    ];
+    // Also include any models set in env vars that aren't already in the list.
+    let env = collect_env().await;
+    let env_model_keys = [
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    ];
+    let existing_ids: std::collections::HashSet<String> = models.iter().map(|(id, _)| id.clone()).collect();
+    for key in &env_model_keys {
+        if let Some(val) = env.get(*key) {
+            let val = val.trim().to_string();
+            if !val.is_empty() && !existing_ids.contains(&val) {
+                models.push((val.clone(), val));
+            }
+        }
+    }
+    log::info!("[list_models] claude: returning {} models", models.len());
+    models
+}
+
 pub async fn check_available() -> EngineStatus {
     match find_claude_binary() {
         Ok(path) => {
@@ -91,9 +125,14 @@ pub async fn run_claude_command(args: Vec<String>) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-async fn spawn_with_args(args: Vec<String>, message: &str, cwd: Option<&str>) -> Result<Child> {
+async fn spawn_with_args(args: Vec<String>, message: &str, cwd: Option<&str>, model_override: Option<&str>) -> Result<Child> {
     let binary = find_claude_binary()?;
-    let env = collect_env().await;
+    let mut env = collect_env().await;
+
+    // Per-conversation model override takes precedence over ANTHROPIC_MODEL env var.
+    if let Some(model) = model_override.filter(|s| !s.is_empty()) {
+        env.insert("ANTHROPIC_MODEL".to_string(), model.to_string());
+    }
 
     let mut cmd = Command::new(&binary);
     cmd.args(args)
@@ -124,6 +163,7 @@ pub async fn spawn_single(
     conversation_id: &str,
     message: &str,
     cwd: Option<&str>,
+    model: Option<&str>,
 ) -> Result<Child> {
     spawn_with_args(
         vec![
@@ -137,6 +177,7 @@ pub async fn spawn_single(
         ],
         message,
         cwd,
+        model,
     )
     .await
 }
@@ -145,6 +186,7 @@ pub async fn spawn_continue(
     conversation_id: &str,
     message: &str,
     cwd: Option<&str>,
+    model: Option<&str>,
 ) -> Result<Child> {
     spawn_with_args(
         vec![
@@ -158,6 +200,7 @@ pub async fn spawn_continue(
         ],
         message,
         cwd,
+        model,
     )
     .await
 }
@@ -182,6 +225,7 @@ pub async fn spawn_headless(
         ],
         message,
         cwd,
+        None,
     )
     .await
 }

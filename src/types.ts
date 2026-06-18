@@ -50,9 +50,24 @@ export interface Conversation {
   updatedAt: number;
   /** Agent engine bound to this session. Defaults to claude for legacy data. */
   engine: AgentEngineId;
+  /** Per-conversation model override. When empty/undefined, uses the engine's global config. */
+  model?: string;
 }
 
 export type AgentEngineId = "claude" | "cursor" | "codebuddy";
+
+/** Env key that each engine uses for its model override in global config. */
+export const ENGINE_MODEL_ENV_KEY: Record<AgentEngineId, string> = {
+  claude: "ANTHROPIC_MODEL",
+  cursor: "CURSOR_MODEL",
+  codebuddy: "CODEBUDDY_MODEL",
+};
+
+/** A model entry returned by the backend's list_models command. */
+export interface ModelEntry {
+  id: string;
+  label: string;
+}
 
 export const AGENT_ENGINES: { id: AgentEngineId; label: string }[] = [
   { id: "claude", label: "Claude Code" },

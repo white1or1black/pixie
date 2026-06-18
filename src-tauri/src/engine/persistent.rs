@@ -39,6 +39,9 @@ pub struct PersistentSession {
     pub session_id: String,
     pub engine_id: String,
     pub last_active: Instant,
+    /// The model override used when spawning this session. Used to detect when
+    /// the per-conversation model has changed and the session must be respawned.
+    pub model_override: Option<String>,
 
     child: Child,
     stdin: ChildStdin,
@@ -89,8 +92,9 @@ impl PersistentSession {
         session_id: &str,
         resume: bool,
         cwd: Option<&str>,
+        model_override: Option<&str>,
     ) -> Result<Self> {
-        let (binary, args, env) = build_persistent_command(engine_id, session_id, resume).await?;
+        let (binary, args, env) = build_persistent_command(engine_id, session_id, resume, model_override).await?;
 
         let mut cmd = Command::new(&binary);
         cmd.args(&args)
@@ -120,6 +124,7 @@ impl PersistentSession {
             session_id: session_id.to_string(),
             engine_id: engine_id.to_string(),
             last_active: Instant::now(),
+            model_override: model_override.map(|s| s.to_string()),
             child,
             stdin,
             stdout,
@@ -239,11 +244,12 @@ async fn build_persistent_command(
     engine_id: &str,
     session_id: &str,
     resume: bool,
+    model_override: Option<&str>,
 ) -> Result<(std::path::PathBuf, Vec<String>, std::collections::HashMap<String, String>)> {
     match engine_id {
         "claude" => {
             let binary = super::claude::find_claude_binary()?;
-            let env = super::claude::collect_env().await;
+            let mut env = super::claude::collect_env().await;
             let mut args = vec![
                 "--print".into(),
                 "--output-format".into(),
@@ -260,6 +266,10 @@ async fn build_persistent_command(
                 args.push("--session-id".into());
             }
             args.push(session_id.into());
+            // Per-conversation model override takes precedence over ANTHROPIC_MODEL env var.
+            if let Some(model) = model_override.filter(|s| !s.is_empty()) {
+                env.insert("ANTHROPIC_MODEL".to_string(), model.to_string());
+            }
             Ok((binary, args, env))
         }
         "codebuddy" => {
@@ -281,10 +291,12 @@ async fn build_persistent_command(
                 args.push("--session-id".into());
             }
             args.push(session_id.into());
-            // Model override.
-            if let Some(model) = env.get("CODEBUDDY_MODEL").filter(|s| !s.is_empty()) {
+            // Per-conversation model override takes precedence over CODEBUDDY_MODEL env var.
+            let model = model_override.filter(|s| !s.is_empty())
+                .or_else(|| env.get("CODEBUDDY_MODEL").filter(|s| !s.is_empty()).map(String::as_str));
+            if let Some(model) = model {
                 args.push("--model".into());
-                args.push(model.clone());
+                args.push(model.to_string());
             }
             Ok((binary, args, env))
         }

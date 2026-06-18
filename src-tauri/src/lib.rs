@@ -4,7 +4,7 @@ mod pty;
 use engine::{
     bind_conversation_engine, check_all_engines, conversation_engine_id,
     init_conversation_engine_map, normalize_engine_id, read_child_stream, remember_session_id,
-    resolve_session_id, spawn_continue, spawn_headless, spawn_single, AgentProcess, ConversationEngineMap,
+    resolve_session_id, set_conversation_model, spawn_continue, spawn_headless, spawn_single, AgentProcess, ConversationEngineMap,
     EngineStatus, NormalizedEvent, SharedAgentProcess,
 };
 use engine::persistent::{
@@ -412,6 +412,7 @@ async fn send_message(
     conversation_id: String,
     engine: Option<String>,
     is_continue: Option<bool>,
+    model: Option<String>,
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
@@ -436,11 +437,20 @@ async fn send_message(
     )
     .await;
 
+    // Store per-conversation model override on the backend.
+    set_conversation_model(
+        &state.conversation_engines,
+        &conversation_id,
+        model.clone(),
+    )
+    .await;
+
     log::info!(
-        "[send_message] start: conv_id={}, engine={}, is_continue={}, msg_len={}",
+        "[send_message] start: conv_id={}, engine={}, is_continue={}, model={:?}, msg_len={}",
         conversation_id,
         engine_id,
         is_continue,
+        model,
         message.len()
     );
 
@@ -459,23 +469,37 @@ async fn send_message(
         let message_owned = message.clone();
         let session_id_owned = session_id.clone();
         let workspace_owned = workspace.clone();
+        let model_owned = model.clone();
 
         tokio::spawn(async move {
             let mut sessions = sessions.lock().await;
 
-            // Try to reuse an existing live session.
+            // Try to reuse an existing live session. Kill and respawn if the
+            // per-conversation model override has changed since the session was
+            // created — the persistent session's model is baked in at spawn time.
             let needs_spawn = match sessions.get_mut(&conv_id) {
                 Some(session) => {
                     if session.is_alive() {
-                        log::info!("[send_message] reusing persistent session for {}", conv_id);
-                        // Write message to the existing session's stdin.
-                        if let Err(e) = session.send_message(&message_owned).await {
-                            log::warn!("[send_message] stdin write failed, will respawn: {}", e);
+                        let model_changed = model_owned.as_deref() != session.model_override.as_deref();
+                        if model_changed {
+                            log::info!(
+                                "[send_message] model changed ({:?} → {:?}), killing session for {}",
+                                session.model_override, model_owned, conv_id
+                            );
                             session.kill().await;
                             sessions.remove(&conv_id);
                             true
                         } else {
-                            false
+                            log::info!("[send_message] reusing persistent session for {}", conv_id);
+                            // Write message to the existing session's stdin.
+                            if let Err(e) = session.send_message(&message_owned).await {
+                                log::warn!("[send_message] stdin write failed, will respawn: {}", e);
+                                session.kill().await;
+                                sessions.remove(&conv_id);
+                                true
+                            } else {
+                                false
+                            }
                         }
                     } else {
                         log::info!("[send_message] persistent session dead, will respawn");
@@ -498,6 +522,7 @@ async fn send_message(
                     &session_id_owned,
                     resume,
                     workspace_owned.as_deref(),
+                    model_owned.as_deref(),
                 )
                 .await
                 {
@@ -633,6 +658,7 @@ async fn send_message(
     let conv_id = conversation_id.clone();
     let engine_id_owned = engine_id.to_string();
     let message_owned = message.clone();
+    let model_owned = model.clone();
 
     tokio::spawn(async move {
         let spawn_result = if is_continue {
@@ -641,6 +667,7 @@ async fn send_message(
                 &session_id,
                 &message_owned,
                 workspace.as_deref(),
+                model_owned.as_deref(),
             )
             .await
         } else {
@@ -649,6 +676,7 @@ async fn send_message(
                 &session_id,
                 &message_owned,
                 workspace.as_deref(),
+                model_owned.as_deref(),
             )
             .await
         };
@@ -1248,6 +1276,69 @@ async fn set_engine_model_config(
     Ok(())
 }
 
+/// Called by the frontend when the user changes the per-conversation model
+/// override in the InputBar dropdown. Updates the backend model state and
+/// kills any existing persistent session so the next `send_message` will
+/// respawn it with the new model.
+#[tauri::command]
+async fn update_conversation_model(
+    conversation_id: String,
+    model: Option<String>,
+    engine: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let engine_id = match engine.as_deref() {
+        Some(e) => engine::normalize_engine_id(e).map_err(|e| e.to_string())?,
+        None => {
+            &conversation_engine_id(&state.conversation_engines, &conversation_id)
+                .await
+                .unwrap_or_else(|| "claude".to_string())
+        }
+    };
+
+    // Update the engine binding first (ensures entry exists).
+    bind_conversation_engine(
+        &state.conversation_engines,
+        &conversation_id,
+        &engine_id,
+    )
+    .await;
+
+    // Store the model override.
+    engine::set_conversation_model(
+        &state.conversation_engines,
+        &conversation_id,
+        model.clone(),
+    )
+    .await;
+
+    log::info!(
+        "[set_conversation_model] conv_id={}, engine={}, model={:?}",
+        conversation_id,
+        engine_id,
+        model
+    );
+
+    // Kill any existing persistent session so the next send_message will
+    // respawn with the new model. Only Claude/CodeBuddy use persistent
+    // sessions; Cursor spawns per-message so no cleanup needed.
+    if engine_id == "claude" || engine_id == "codebuddy" {
+        let mut sessions = state.sessions.lock().await;
+        if let Some(session) = sessions.get_mut(&conversation_id) {
+            log::info!(
+                "[set_conversation_model] killing persistent session for conv {} (model changed)",
+                conversation_id
+            );
+            session.kill().await;
+            sessions.remove(&conversation_id);
+        }
+        // Also remove from kill registry (the old PID is stale).
+        state.kill_registry.lock().await.remove(&conversation_id);
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 async fn set_model_config(
     config: HashMap<String, String>,
@@ -1477,6 +1568,19 @@ async fn check_engines_available() -> Result<Vec<EngineStatusResponse>, String> 
 #[tauri::command]
 async fn check_engine_available(engine: String) -> Result<EngineStatusResponse, String> {
     Ok(engine::check_engine(&engine).await.into())
+}
+
+#[tauri::command]
+async fn list_models(engine: String) -> Result<Vec<serde_json::Value>, String> {
+    log::info!("[list_models] called for engine={engine}");
+    let models = engine::list_models(&engine).await;
+    log::info!("[list_models] engine={engine} returned {} models", models.len());
+    Ok(models
+        .into_iter()
+        .map(|(id, label)| {
+            serde_json::json!({ "id": id, "label": label })
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -2224,6 +2328,8 @@ pub fn run() {
             save_history,
             check_engines_available,
             check_engine_available,
+            list_models,
+            update_conversation_model,
             list_scheduled_tasks,
             create_scheduled_task,
             update_scheduled_task,
