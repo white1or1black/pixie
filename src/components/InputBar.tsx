@@ -273,255 +273,220 @@ export default function InputBar({
 
   return (
     <div className="border-t border-[var(--border-color)] bg-[var(--bg-primary)] px-4 py-3">
-      <div className="max-w-4xl mx-auto w-full">
-        <div ref={containerRef} className="relative">
-          {dropdownOpen && (
-            <SkillsDropdown
-              skills={skills}
-              onSelect={handleSelectSkill}
-              onClose={() => setDropdownOpen(false)}
-            />
-          )}
-
-          {modelDropdownOpen && engine && (
-            <div className="absolute bottom-full left-2 mb-2 w-52 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg shadow-lg z-50 py-1 max-h-64 overflow-y-auto">
-              {/* Default option */}
-              <button
-                type="button"
-                onClick={() => handleSelectModel(undefined)}
-                className={`w-full text-left px-3 py-1.5 text-xs hover:bg-[var(--bg-tertiary)] transition-colors ${
-                  !model ? "text-[var(--accent)] font-medium" : "text-[var(--text-primary)]"
-                }`}
-              >
-                Default{engineModelConfigs[engine]?.[ENGINE_MODEL_ENV_KEY[engine]] ? ` (${engineModelConfigs[engine][ENGINE_MODEL_ENV_KEY[engine]]})` : ""}
-              </button>
-              {/* Presets */}
-              {availableModels.map((m) => (
-                <button
-                  key={m.id}
-                  type="button"
-                  onClick={() => handleSelectModel(m.id)}
-                  className={`w-full text-left px-3 py-1.5 text-xs hover:bg-[var(--bg-tertiary)] transition-colors ${
-                    model === m.id ? "text-[var(--accent)] font-medium" : "text-[var(--text-primary)]"
-                  }`}
+      <div ref={containerRef} className="max-w-4xl mx-auto w-full">
+        {attachments.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mb-2 px-1">
+            {attachments.map((path) => {
+              const rel = toWorkspaceRelative(path, workspacePath);
+              return (
+                <span
+                  key={path}
+                  className="inline-flex items-center gap-1 max-w-[240px] pl-2 pr-1 py-1 rounded-lg bg-[var(--bg-tertiary)] border border-[var(--border-color)] text-xs text-[var(--text-primary)]"
+                  title={rel}
                 >
-                  {m.label}
-                  {m.id !== m.label && <span className="ml-1.5 text-[var(--text-secondary)] opacity-60">{m.id}</span>}
-                </button>
-              ))}
-              {/* Custom model input */}
-              <div className="border-t border-[var(--border-color)] mt-1 pt-1 px-2">
-                <div className="flex items-center gap-1">
-                  <input
-                    type="text"
-                    value={customModelInput}
-                    onChange={(e) => setCustomModelInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && customModelInput.trim()) {
-                        e.preventDefault();
-                        handleSelectModel(customModelInput.trim());
-                      }
-                    }}
-                    placeholder="Custom model..."
-                    className="flex-1 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded px-2 py-1 text-[var(--text-primary)] placeholder:text-[var(--text-secondary)]/50 outline-none focus:border-[var(--accent)]"
-                    autoFocus
-                  />
-                  {customModelInput.trim() && (
-                    <button
-                      type="button"
-                      onClick={() => handleSelectModel(customModelInput.trim())}
-                      className="text-[10px] text-[var(--accent)] hover:underline shrink-0"
-                    >
-                      Apply
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {attachments.length > 0 && (
-            <div className="flex flex-wrap gap-1.5 mb-2 px-1">
-              {attachments.map((path) => {
-                const rel = toWorkspaceRelative(path, workspacePath);
-                return (
-                  <span
-                    key={path}
-                    className="inline-flex items-center gap-1 max-w-[240px] pl-2 pr-1 py-1 rounded-lg bg-[var(--bg-tertiary)] border border-[var(--border-color)] text-xs text-[var(--text-primary)]"
-                    title={rel}
+                  <svg
+                    width="13"
+                    height="13"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="shrink-0 opacity-70"
                   >
-                    {/* File icon */}
-                    <svg
-                      width="13"
-                      height="13"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      className="shrink-0 opacity-70"
-                    >
-                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                      <polyline points="14 2 14 8 20 8" />
-                    </svg>
-                    <span className="truncate">{basename(path)}</span>
-                    <button
-                      type="button"
-                      onClick={() => removeAttachment(path)}
-                      title="Remove"
-                      className="shrink-0 flex items-center justify-center w-4 h-4 rounded text-[var(--text-secondary)] hover:bg-[var(--border-color)] hover:text-[var(--text-primary)] transition-colors"
-                    >
-                      <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
-                        <path d="M1 1l8 8M9 1l-8 8" />
-                      </svg>
-                    </button>
-                  </span>
-                );
-              })}
-            </div>
-          )}
-
-          <div
-            className={`flex items-end gap-1.5 bg-[var(--bg-secondary)] border rounded-2xl px-3 py-2 focus-within:border-[var(--accent)] transition-colors ${
-              dragActive
-                ? "border-[var(--accent)] ring-2 ring-[var(--accent)]/40 bg-[var(--bg-tertiary)]"
-                : "border-[var(--border-color)]"
-            }`}
-          >
-            {/* Left action buttons: Attach, Skills, Model */}
-            <div className="flex flex-col gap-0.5 shrink-0 pb-0.5">
-              {/* Attach files (native picker) */}
-              <button
-                type="button"
-                onClick={handlePickFiles}
-                disabled={disabled || isGenerating}
-                title="Attach files"
-                className="flex items-center justify-center w-7 h-7 rounded-lg text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-              >
-                <svg
-                  width="15"
-                  height="15"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-                </svg>
-              </button>
-              {/* Skills */}
-              <button
-                type="button"
-                onClick={toggleDropdown}
-                disabled={disabled || isGenerating}
-                title="Browse skills"
-                className="flex items-center justify-center w-7 h-7 rounded-lg text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-              >
-                <svg
-                  width="15"
-                  height="15"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M12 3l1.9 4.8L18.7 9.7l-4.8 1.9L12 16.4l-1.9-4.8L5.3 9.7l4.8-1.9L12 3z" />
-                </svg>
-              </button>
-              {/* Model selection */}
-              {engine && (
-                <button
-                  type="button"
-                  onClick={() => { if (!isGenerating) setModelDropdownOpen((v) => !v); }}
-                  disabled={isGenerating}
-                  title="Select model"
-                  className={`flex items-center justify-center w-7 h-7 rounded-lg transition-colors ${
-                    model
-                      ? "text-[var(--accent)] bg-[var(--accent)]/10"
-                      : "text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]"
-                  } ${isGenerating ? "opacity-50 cursor-not-allowed" : ""}`}
-                >
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="4" y="4" width="16" height="16" rx="2" />
-                    <rect x="9" y="9" width="6" height="6" />
-                    <line x1="9" y1="2" x2="9" y2="4" />
-                    <line x1="15" y1="2" x2="15" y2="4" />
-                    <line x1="9" y1="20" x2="9" y2="22" />
-                    <line x1="15" y1="20" x2="15" y2="22" />
-                    <line x1="2" y1="9" x2="4" y2="9" />
-                    <line x1="2" y1="15" x2="4" y2="15" />
-                    <line x1="20" y1="9" x2="22" y2="9" />
-                    <line x1="20" y1="15" x2="22" y2="15" />
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                    <polyline points="14 2 14 8 20 8" />
                   </svg>
-                </button>
-              )}
-            </div>
-            <textarea
-              ref={textareaRef}
-              value={value}
-              onChange={(e) => onChange(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder={
-                disabled
-                  ? (disabledHint ?? "Type a message… (add a workspace to send)")
-                  : isGenerating
-                    ? "Type next message… (Enter to send, Shift+Enter for newline)"
-                    : "Type a message... (Enter to send, Shift+Enter for newline)"
-              }
-              rows={3}
-              className="flex-1 self-stretch bg-transparent text-[var(--text-primary)] placeholder-[var(--text-secondary)] resize-none outline-none text-sm leading-6 max-h-[192px]"
-            />
-
-            {isGenerating ? (
-              <button
-                onClick={onStop}
-                className="shrink-0 flex items-center justify-center w-8 h-8 rounded-xl bg-red-600 hover:bg-red-700 text-white transition-colors self-end"
-                title="Stop generation (Escape)"
-              >
-                <svg
-                  width="14"
-                  height="14"
-                  viewBox="0 0 16 16"
-                  fill="currentColor"
-                >
-                  <rect x="3" y="3" width="10" height="10" rx="1" />
-                </svg>
-              </button>
-            ) : (
-              <button
-                onClick={handleSend}
-                disabled={!canSend}
-                className="shrink-0 flex items-center justify-center w-8 h-8 rounded-xl bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-30 disabled:cursor-not-allowed text-white transition-colors self-end"
-                title="Send message (Enter)"
-              >
-                <svg
-                  width="14"
-                  height="14"
-                  viewBox="0 0 16 16"
-                  fill="currentColor"
-                >
-                  <path d="M8 2L14 9H10V14H6V9H2L8 2Z" />
-                </svg>
-              </button>
-            )}
+                  <span className="truncate">{basename(path)}</span>
+                  <button
+                    type="button"
+                    onClick={() => removeAttachment(path)}
+                    title="Remove"
+                    className="shrink-0 flex items-center justify-center w-4 h-4 rounded text-[var(--text-secondary)] hover:bg-[var(--border-color)] hover:text-[var(--text-primary)] transition-colors"
+                  >
+                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+                      <path d="M1 1l8 8M9 1l-8 8" />
+                    </svg>
+                  </button>
+                </span>
+              );
+            })}
           </div>
+        )}
+
+        <div
+          className={`flex items-end bg-[var(--bg-secondary)] border rounded-2xl focus-within:border-[var(--accent)] transition-colors ${
+            dragActive
+              ? "border-[var(--accent)] ring-2 ring-[var(--accent)]/40 bg-[var(--bg-tertiary)]"
+              : "border-[var(--border-color)]"
+          }`}
+        >
+          <textarea
+            ref={textareaRef}
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder={
+              disabled
+                ? (disabledHint ?? "Type a message… (add a workspace to send)")
+                : isGenerating
+                  ? "Type next message… (Enter to send, Shift+Enter for newline)"
+                  : "Type a message... (Enter to send, Shift+Enter for newline)"
+            }
+            rows={3}
+            className="flex-1 bg-transparent text-[var(--text-primary)] placeholder-[var(--text-secondary)] resize-none outline-none text-sm leading-6 max-h-[192px] px-4 py-2.5"
+          />
+
+          {isGenerating ? (
+            <button
+              onClick={onStop}
+              className="shrink-0 flex items-center justify-center w-8 h-8 rounded-xl bg-red-600 hover:bg-red-700 text-white transition-colors mr-2 self-end mb-2"
+              title="Stop generation (Escape)"
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                <rect x="3" y="3" width="10" height="10" rx="1" />
+              </svg>
+            </button>
+          ) : (
+            <button
+              onClick={handleSend}
+              disabled={!canSend}
+              className="shrink-0 flex items-center justify-center w-8 h-8 rounded-xl bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-30 disabled:cursor-not-allowed text-white transition-colors mr-2 self-end mb-2"
+              title="Send message (Enter)"
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                <path d="M8 2L14 9H10V14H6V9H2L8 2Z" />
+              </svg>
+            </button>
+          )}
         </div>
 
-        <div className="flex justify-between items-center mt-1 px-1">
-          <span className="text-[10px] text-[var(--text-secondary)] opacity-60">
-            {isGenerating
-              ? "Generating..."
-              : dragActive
-                ? "Drop files to attach…"
-                : disabled
-                  ? (disabledHint ?? "")
-                  : ""}
-          </span>
+        {/* Bottom action bar: Attach, Skills, Model */}
+        <div className="flex items-center gap-0.5 mt-1 px-1">
+          <button
+            type="button"
+            onClick={handlePickFiles}
+            disabled={disabled || isGenerating}
+            title="Attach files"
+            className="flex items-center justify-center w-7 h-6 rounded-md text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+            </svg>
+          </button>
+
+          {/* Skills button + dropdown */}
+          <div className="relative">
+            <button
+              type="button"
+              onClick={toggleDropdown}
+              disabled={disabled || isGenerating}
+              title="Browse skills"
+              className="flex items-center justify-center w-7 h-6 rounded-md text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 3l1.9 4.8L18.7 9.7l-4.8 1.9L12 16.4l-1.9-4.8L5.3 9.7l4.8-1.9L12 3z" />
+              </svg>
+            </button>
+            {dropdownOpen && (
+              <SkillsDropdown
+                skills={skills}
+                onSelect={handleSelectSkill}
+                onClose={() => setDropdownOpen(false)}
+              />
+            )}
+          </div>
+
+          {/* Model button + dropdown */}
+          {engine && (
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => { if (!isGenerating) setModelDropdownOpen((v) => !v); }}
+                disabled={isGenerating}
+                title="Select model"
+                className={`flex items-center gap-1 h-6 px-1.5 rounded-md text-[11px] transition-colors ${
+                  model
+                    ? "text-[var(--accent)] bg-[var(--accent)]/10"
+                    : "text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]"
+                } ${isGenerating ? "opacity-50 cursor-not-allowed" : ""}`}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="4" y="4" width="16" height="16" rx="2" />
+                  <rect x="9" y="9" width="6" height="6" />
+                  <line x1="9" y1="2" x2="9" y2="4" />
+                  <line x1="15" y1="2" x2="15" y2="4" />
+                  <line x1="9" y1="20" x2="9" y2="22" />
+                  <line x1="15" y1="20" x2="15" y2="22" />
+                  <line x1="2" y1="9" x2="4" y2="9" />
+                  <line x1="2" y1="15" x2="4" y2="15" />
+                  <line x1="20" y1="9" x2="22" y2="9" />
+                  <line x1="20" y1="15" x2="22" y2="15" />
+                </svg>
+                <span className="truncate max-w-[100px]">
+                  {model
+                    ? (availableModels.find((m) => m.id === model)?.label ?? model)
+                    : "Default"}
+                </span>
+              </button>
+              {modelDropdownOpen && (
+                <div className="absolute bottom-full left-0 mb-1 w-52 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg shadow-lg z-50 py-1 max-h-64 overflow-y-auto">
+                  <button
+                    type="button"
+                    onClick={() => handleSelectModel(undefined)}
+                    className={`w-full text-left px-3 py-1.5 text-xs hover:bg-[var(--bg-tertiary)] transition-colors ${
+                      !model ? "text-[var(--accent)] font-medium" : "text-[var(--text-primary)]"
+                    }`}
+                  >
+                    Default{engineModelConfigs[engine]?.[ENGINE_MODEL_ENV_KEY[engine]] ? ` (${engineModelConfigs[engine][ENGINE_MODEL_ENV_KEY[engine]]})` : ""}
+                  </button>
+                  {availableModels.map((m) => (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => handleSelectModel(m.id)}
+                      className={`w-full text-left px-3 py-1.5 text-xs hover:bg-[var(--bg-tertiary)] transition-colors ${
+                        model === m.id ? "text-[var(--accent)] font-medium" : "text-[var(--text-primary)]"
+                      }`}
+                    >
+                      {m.label}
+                      {m.id !== m.label && <span className="ml-1.5 text-[var(--text-secondary)] opacity-60">{m.id}</span>}
+                    </button>
+                  ))}
+                  <div className="border-t border-[var(--border-color)] mt-1 pt-1 px-2">
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="text"
+                        value={customModelInput}
+                        onChange={(e) => setCustomModelInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && customModelInput.trim()) {
+                            e.preventDefault();
+                            handleSelectModel(customModelInput.trim());
+                          }
+                        }}
+                        placeholder="Custom model..."
+                        className="flex-1 text-xs bg-[var(--bg-primary)] border border-[var(--border-color)] rounded px-2 py-1 text-[var(--text-primary)] placeholder:text-[var(--text-secondary)]/50 outline-none focus:border-[var(--accent)]"
+                        autoFocus
+                      />
+                      {customModelInput.trim() && (
+                        <button
+                          type="button"
+                          onClick={() => handleSelectModel(customModelInput.trim())}
+                          className="text-[10px] text-[var(--accent)] hover:underline shrink-0"
+                        >
+                          Apply
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          <span className="flex-1" />
           {charCount > 0 && (
             <span
               className={`text-[10px] ${
@@ -532,6 +497,9 @@ export default function InputBar({
             </span>
           )}
         </div>
+      </div>
+    </div>
+  );
       </div>
     </div>
   );

@@ -110,7 +110,7 @@ export default function SkillsDropdown({ skills, onSelect, onClose }: SkillsDrop
     );
 
   return (
-    <div className="absolute bottom-full left-0 right-0 mb-2 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-xl shadow-lg max-h-80 overflow-hidden flex flex-col z-20">
+    <div className="absolute bottom-full left-0 mb-1 w-64 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-xl shadow-lg max-h-80 overflow-hidden flex flex-col z-20">
       <div className="p-2 border-b border-[var(--border-color)]">
         <input
           ref={searchRef}
