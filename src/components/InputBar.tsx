@@ -90,9 +90,11 @@ export default function InputBar({
     if (!el) return;
     el.style.height = "auto";
     const lineHeight = 24;
+    const minLines = 1;
     const maxLines = 8;
-    const maxHeight = lineHeight * maxLines;
-    el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`;
+    const min = lineHeight * minLines;
+    const max = lineHeight * maxLines;
+    el.style.height = `${Math.max(min, Math.min(el.scrollHeight, max))}px`;
   }, [value, textareaRef]);
 
   // Whether drops / picks should currently be accepted. Read from a ref so the
@@ -282,7 +284,7 @@ export default function InputBar({
           )}
 
           {modelDropdownOpen && engine && (
-            <div className="absolute bottom-full right-4 mb-2 w-52 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg shadow-lg z-50 py-1 max-h-64 overflow-y-auto">
+            <div className="absolute bottom-full left-2 mb-2 w-52 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg shadow-lg z-50 py-1 max-h-64 overflow-y-auto">
               {/* Default option */}
               <button
                 type="button"
@@ -381,55 +383,84 @@ export default function InputBar({
           )}
 
           <div
-            className={`flex items-end gap-2 bg-[var(--bg-secondary)] border rounded-2xl px-4 py-2 focus-within:border-[var(--accent)] transition-colors ${
+            className={`flex items-end gap-1.5 bg-[var(--bg-secondary)] border rounded-2xl px-3 py-2 focus-within:border-[var(--accent)] transition-colors ${
               dragActive
                 ? "border-[var(--accent)] ring-2 ring-[var(--accent)]/40 bg-[var(--bg-tertiary)]"
                 : "border-[var(--border-color)]"
             }`}
           >
-            {/* Attach files (native picker) */}
-            <button
-              type="button"
-              onClick={handlePickFiles}
-              disabled={disabled || isGenerating}
-              title="Attach files"
-              className="shrink-0 flex items-center justify-center w-9 h-9 rounded-xl text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-30 disabled:cursor-not-allowed transition-colors self-center"
-            >
-              {/* Paperclip icon */}
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
+            {/* Left action buttons: Attach, Skills, Model */}
+            <div className="flex flex-col gap-0.5 shrink-0 pb-0.5">
+              {/* Attach files (native picker) */}
+              <button
+                type="button"
+                onClick={handlePickFiles}
+                disabled={disabled || isGenerating}
+                title="Attach files"
+                className="flex items-center justify-center w-7 h-7 rounded-lg text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
               >
-                <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-              </svg>
-            </button>
-            <button
-              type="button"
-              onClick={toggleDropdown}
-              disabled={disabled || isGenerating}
-              title="Browse skills"
-              className="shrink-0 flex items-center justify-center w-9 h-9 rounded-xl text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-30 disabled:cursor-not-allowed transition-colors self-center"
-            >
-              {/* Sparkles icon */}
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
+                <svg
+                  width="15"
+                  height="15"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                </svg>
+              </button>
+              {/* Skills */}
+              <button
+                type="button"
+                onClick={toggleDropdown}
+                disabled={disabled || isGenerating}
+                title="Browse skills"
+                className="flex items-center justify-center w-7 h-7 rounded-lg text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
               >
-                <path d="M12 3l1.9 4.8L18.7 9.7l-4.8 1.9L12 16.4l-1.9-4.8L5.3 9.7l4.8-1.9L12 3z" />
-              </svg>
-            </button>
+                <svg
+                  width="15"
+                  height="15"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M12 3l1.9 4.8L18.7 9.7l-4.8 1.9L12 16.4l-1.9-4.8L5.3 9.7l4.8-1.9L12 3z" />
+                </svg>
+              </button>
+              {/* Model selection */}
+              {engine && (
+                <button
+                  type="button"
+                  onClick={() => { if (!isGenerating) setModelDropdownOpen((v) => !v); }}
+                  disabled={isGenerating}
+                  title="Select model"
+                  className={`flex items-center justify-center w-7 h-7 rounded-lg transition-colors ${
+                    model
+                      ? "text-[var(--accent)] bg-[var(--accent)]/10"
+                      : "text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)]"
+                  } ${isGenerating ? "opacity-50 cursor-not-allowed" : ""}`}
+                >
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="4" y="4" width="16" height="16" rx="2" />
+                    <rect x="9" y="9" width="6" height="6" />
+                    <line x1="9" y1="2" x2="9" y2="4" />
+                    <line x1="15" y1="2" x2="15" y2="4" />
+                    <line x1="9" y1="20" x2="9" y2="22" />
+                    <line x1="15" y1="20" x2="15" y2="22" />
+                    <line x1="2" y1="9" x2="4" y2="9" />
+                    <line x1="2" y1="15" x2="4" y2="15" />
+                    <line x1="20" y1="9" x2="22" y2="9" />
+                    <line x1="20" y1="15" x2="22" y2="15" />
+                  </svg>
+                </button>
+              )}
+            </div>
             <textarea
               ref={textareaRef}
               value={value}
@@ -442,20 +473,19 @@ export default function InputBar({
                     ? "Type next message… (Enter to send, Shift+Enter for newline)"
                     : "Type a message... (Enter to send, Shift+Enter for newline)"
               }
-              rows={1}
-              className="flex-1 self-center bg-transparent text-[var(--text-primary)] placeholder-[var(--text-secondary)] resize-none outline-none text-sm leading-6 py-0.5 max-h-[192px]"
+              rows={3}
+              className="flex-1 self-stretch bg-transparent text-[var(--text-primary)] placeholder-[var(--text-secondary)] resize-none outline-none text-sm leading-6 max-h-[192px]"
             />
 
             {isGenerating ? (
               <button
                 onClick={onStop}
-                className="shrink-0 flex items-center justify-center w-9 h-9 rounded-xl bg-red-600 hover:bg-red-700 text-white transition-colors"
+                className="shrink-0 flex items-center justify-center w-8 h-8 rounded-xl bg-red-600 hover:bg-red-700 text-white transition-colors self-end"
                 title="Stop generation (Escape)"
               >
-                {/* Stop square icon */}
                 <svg
-                  width="16"
-                  height="16"
+                  width="14"
+                  height="14"
                   viewBox="0 0 16 16"
                   fill="currentColor"
                 >
@@ -466,13 +496,12 @@ export default function InputBar({
               <button
                 onClick={handleSend}
                 disabled={!canSend}
-                className="shrink-0 flex items-center justify-center w-9 h-9 rounded-xl bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-30 disabled:cursor-not-allowed text-white transition-colors"
+                className="shrink-0 flex items-center justify-center w-8 h-8 rounded-xl bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-30 disabled:cursor-not-allowed text-white transition-colors self-end"
                 title="Send message (Enter)"
               >
-                {/* Arrow up icon */}
                 <svg
-                  width="16"
-                  height="16"
+                  width="14"
+                  height="14"
                   viewBox="0 0 16 16"
                   fill="currentColor"
                 >
@@ -484,51 +513,15 @@ export default function InputBar({
         </div>
 
         <div className="flex justify-between items-center mt-1 px-1">
-          <div className="flex items-center gap-2 min-w-0">
-            <span className="text-[10px] text-[var(--text-secondary)] opacity-60">
-              {isGenerating
-                ? "Generating..."
-                : dragActive
-                  ? "Drop files to attach…"
-                  : disabled
-                    ? (disabledHint ?? "")
-                    : ""}
-            </span>
-            {engine && (
-              <button
-                type="button"
-                onClick={() => { if (!isGenerating) setModelDropdownOpen((v) => !v); }}
-                className={`flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded transition-colors ${
-                  model
-                    ? "text-[var(--accent)] bg-[var(--accent)]/10"
-                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
-                } ${isGenerating ? "opacity-50 cursor-not-allowed" : ""}`}
-                disabled={isGenerating}
-                title="Select model"
-              >
-                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <rect x="4" y="4" width="16" height="16" rx="2" />
-                  <rect x="9" y="9" width="6" height="6" />
-                  <line x1="9" y1="2" x2="9" y2="4" />
-                  <line x1="15" y1="2" x2="15" y2="4" />
-                  <line x1="9" y1="20" x2="9" y2="22" />
-                  <line x1="15" y1="20" x2="15" y2="22" />
-                  <line x1="2" y1="9" x2="4" y2="9" />
-                  <line x1="2" y1="15" x2="4" y2="15" />
-                  <line x1="20" y1="9" x2="22" y2="9" />
-                  <line x1="20" y1="15" x2="22" y2="15" />
-                </svg>
-                <span className="truncate max-w-[160px]">
-                  {model
-                    ? (availableModels.find((m) => m.id === model)?.label ?? model)
-                    : "Default"}
-                </span>
-                <svg width="8" height="8" viewBox="0 0 8 8" fill="currentColor" className="opacity-60">
-                  <path d="M0 2l4 4 4-4z" />
-                </svg>
-              </button>
-            )}
-          </div>
+          <span className="text-[10px] text-[var(--text-secondary)] opacity-60">
+            {isGenerating
+              ? "Generating..."
+              : dragActive
+                ? "Drop files to attach…"
+                : disabled
+                  ? (disabledHint ?? "")
+                  : ""}
+          </span>
           {charCount > 0 && (
             <span
               className={`text-[10px] ${
