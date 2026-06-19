@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::OnceLock;
 
 pub const ENV_EXACT: &[&str] = &[
@@ -217,6 +218,57 @@ pub async fn run_with_env(
     cmd.output()
         .await
         .map_err(|e| anyhow::anyhow!("failed to execute {}: {e}", binary.display()))
+}
+
+/// Spawn a one-shot agent process for a readiness/auth probe. Unlike the
+/// streaming spawns in each engine module, this **captures stderr** — auth
+/// failures typically exit non-zero with the error on stderr before any
+/// stream-json is emitted — and runs detached from the controlling terminal.
+pub async fn spawn_probe_child(
+    binary: PathBuf,
+    args: &[String],
+    message: &str,
+    cwd: Option<&str>,
+    env: &HashMap<String, String>,
+) -> anyhow::Result<tokio::process::Child> {
+    let mut cmd = tokio::process::Command::new(&binary);
+    cmd.args(args)
+        .arg(message)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    detach_from_controlling_terminal(&mut cmd);
+    cmd.spawn()
+        .map_err(|e| anyhow::anyhow!("failed to spawn probe process: {e}"))
+}
+
+/// Spawn an engine command fire-and-forget (used for the one-click login flow).
+/// stdout/stderr are discarded and the `Child` handle is dropped **without**
+/// `kill_on_drop`, so the process keeps running — the login command opens a
+/// browser and stays alive to receive the OAuth callback and write credentials.
+pub async fn spawn_detached(
+    binary: PathBuf,
+    args: &[String],
+    env: &HashMap<String, String>,
+) -> anyhow::Result<()> {
+    let mut cmd = tokio::process::Command::new(&binary);
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    detach_from_controlling_terminal(&mut cmd);
+    cmd.spawn()
+        .map_err(|e| anyhow::anyhow!("failed to spawn login process: {e}"))?;
+    Ok(())
 }
 
 pub const MAX_TOOL_RESULT_CHARS: usize = 8_000;

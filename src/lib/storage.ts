@@ -29,6 +29,9 @@ export interface AppConfig {
   engineModelConfigs: EngineModelConfigs;
   workspaces: WorkspaceState[];
   activeWorkspaceId: string | null;
+  /** Engine ids that have passed a readiness probe before, so returning users
+   *  skip a billable ping on launch. Cleared for an engine when a probe fails. */
+  knownReadyEngines: AgentEngineId[];
 }
 
 export interface HistoryEntry {
@@ -47,6 +50,7 @@ const EMPTY_CONFIG: AppConfig = {
   },
   workspaces: [],
   activeWorkspaceId: null,
+  knownReadyEngines: [],
 };
 
 let config: AppConfig = EMPTY_CONFIG;
@@ -126,10 +130,16 @@ interface ConfigWire {
   engine_model_configs?: unknown;
   workspaces?: unknown;
   active_workspace_id?: string | null;
+  known_ready_engines?: unknown;
 }
 
 function isValidEngine(v: unknown): v is AgentEngineId {
   return v === "claude" || v === "cursor" || v === "codebuddy";
+}
+
+/** Coerce a persisted `known_ready_engines` blob into a valid engine-id list. */
+function coerceEngineIds(raw: unknown): AgentEngineId[] {
+  return Array.isArray(raw) ? raw.filter(isValidEngine) : [];
 }
 
 /** Merge a possibly-null/partial per-engine config blob over the defaults. */
@@ -176,6 +186,7 @@ function wireToConfig(w: ConfigWire | null): AppConfig {
     workspaces: coerceWorkspaces(w.workspaces),
     activeWorkspaceId:
       typeof w.active_workspace_id === "string" ? w.active_workspace_id : null,
+    knownReadyEngines: coerceEngineIds(w.known_ready_engines),
   };
 }
 
@@ -187,6 +198,7 @@ function configToWire(c: AppConfig): ConfigWire {
     engine_model_configs: c.engineModelConfigs,
     workspaces: c.workspaces,
     active_workspace_id: c.activeWorkspaceId,
+    known_ready_engines: c.knownReadyEngines,
   };
 }
 
@@ -280,6 +292,7 @@ function migrateFromLocalStorage(): { config: AppConfig; history: HistoryEntry[]
     engineModelConfigs,
     workspaces,
     activeWorkspaceId: typeof data.activeWorkspaceId === "string" ? data.activeWorkspaceId : null,
+    knownReadyEngines: [],
   };
 
   return { config, history };

@@ -44,6 +44,11 @@ pub struct AppConfig {
     pub workspaces: Vec<serde_json::Value>,
     #[serde(default)]
     pub active_workspace_id: Option<String>,
+    /// Engine ids that have previously passed a readiness probe (logged in +
+    /// working). The frontend uses this to skip a billable ping on launch for
+    /// returning users, and removes an id when a later probe fails.
+    #[serde(default)]
+    pub known_ready_engines: Vec<String>,
 }
 
 /// One line of `history.jsonl`: a conversation (full, with messages) and the
@@ -63,6 +68,10 @@ pub struct EngineStatusResponse {
     pub version: Option<String>,
     pub path: Option<String>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub auth_state: engine::AuthState,
+    #[serde(default)]
+    pub probe_error: Option<String>,
 }
 
 impl From<EngineStatus> for EngineStatusResponse {
@@ -74,6 +83,8 @@ impl From<EngineStatus> for EngineStatusResponse {
             version: s.version,
             path: s.path,
             error: s.error,
+            auth_state: s.auth_state,
+            probe_error: s.probe_error,
         }
     }
 }
@@ -1748,6 +1759,23 @@ async fn check_engine_available(engine: String) -> Result<EngineStatusResponse, 
     Ok(engine::check_engine(&engine).await.into())
 }
 
+/// Probe one engine's readiness by sending a tiny "ping" turn and classifying
+/// the outcome. Cheap-checks the binary first; if absent, returns immediately
+/// with `available=false` (no probe). Otherwise this is a real, billable model
+/// call, so callers should cache a `Ready` result rather than re-probing freely.
+#[tauri::command]
+async fn probe_engine(engine: String) -> Result<EngineStatusResponse, String> {
+    Ok(engine::probe_engine(&engine).await.into())
+}
+
+/// Spawn an engine's login command (e.g. `cursor-agent login`) detached so it
+/// opens the browser for OAuth. Fire-and-forget; the frontend re-probes after
+/// the user completes login.
+#[tauri::command]
+async fn engine_login(engine: String) -> Result<(), String> {
+    engine::login(&engine).await.map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn list_models(engine: String) -> Result<Vec<serde_json::Value>, String> {
     log::info!("[list_models] called for engine={engine}");
@@ -2514,6 +2542,8 @@ pub fn run() {
             save_history,
             check_engines_available,
             check_engine_available,
+            probe_engine,
+            engine_login,
             list_models,
             update_conversation_model,
             list_scheduled_tasks,

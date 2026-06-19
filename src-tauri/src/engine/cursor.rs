@@ -32,33 +32,53 @@ pub async fn check_available() -> EngineStatus {
         Ok(path) => {
             let path_str = path.display().to_string();
             match get_cursor_version().await {
-                Ok(version) => EngineStatus {
-                    id: "cursor".into(),
-                    display_name: "Cursor Agent".into(),
-                    available: true,
-                    version: Some(version),
-                    path: Some(path_str),
-                    error: None,
-                },
-                Err(e) => EngineStatus {
-                    id: "cursor".into(),
-                    display_name: "Cursor Agent".into(),
-                    available: true,
-                    version: None,
-                    path: Some(path_str),
-                    error: Some(e.to_string()),
-                },
+                Ok(version) => EngineStatus::basic(
+                    "cursor",
+                    "Cursor Agent",
+                    true,
+                    Some(version),
+                    Some(path_str),
+                    None,
+                ),
+                Err(e) => EngineStatus::basic(
+                    "cursor",
+                    "Cursor Agent",
+                    true,
+                    None,
+                    Some(path_str),
+                    Some(e.to_string()),
+                ),
             }
         }
-        Err(e) => EngineStatus {
-            id: "cursor".into(),
-            display_name: "Cursor Agent".into(),
-            available: false,
-            version: None,
-            path: None,
-            error: Some(e.to_string()),
-        },
+        Err(e) => EngineStatus::basic(
+            "cursor",
+            "Cursor Agent",
+            false,
+            None,
+            None,
+            Some(e.to_string()),
+        ),
     }
+}
+
+/// Spawn a one-shot cursor-agent process for the readiness probe. Reuses the
+/// streaming args (-p --force --output-format stream-json --stream-partial-output)
+/// with the CLI's default model; stderr is captured by `spawn_probe_child` so an
+/// auth failure surfaces for classification.
+pub async fn spawn_probe() -> Result<Child> {
+    let binary = find_cursor_binary()?;
+    let env = collect_env().await;
+    let args = stream_args_with_model(None);
+    shared::spawn_probe_child(binary, &args, "ping", None, &env).await
+}
+
+/// Spawn the one-click login flow (`cursor-agent login`), which opens a browser.
+/// Fire-and-forget; the user re-probes after completing login.
+pub async fn spawn_login() -> Result<()> {
+    let binary = find_cursor_binary()?;
+    let env = collect_env().await;
+    let args: Vec<String> = vec!["login".into()];
+    shared::spawn_detached(binary, &args, &env).await
 }
 
 /// Fetch available models from `cursor-agent --list-models`.

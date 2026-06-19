@@ -11,6 +11,10 @@ const iconUrl = new URL("../assets/icon.svg", import.meta.url).href;
 interface SettingsProps {
   engineStatuses: EngineStatus[] | null;
   onRefreshStatus: () => void;
+  /** Open the engine-setup modal (install / detect-ready / one-click login). */
+  onOpenSetup: () => void;
+  /** Engines that are installed + ready; the Preferred Engine picker is limited to these. */
+  readyEngineIds: AgentEngineId[];
   defaultEngine: AgentEngineId;
   onDefaultEngineChange: (engine: AgentEngineId) => void;
   theme: "dark" | "light";
@@ -31,6 +35,8 @@ interface SettingsProps {
 export default function Settings({
   engineStatuses,
   onRefreshStatus,
+  onOpenSetup,
+  readyEngineIds,
   defaultEngine,
   onDefaultEngineChange,
   theme,
@@ -97,46 +103,59 @@ export default function Settings({
             </h3>
             <div className="space-y-3">
               {engineStatuses ? (
-                engineStatuses.map((status) => (
-                  <div
-                    key={status.id}
-                    className="bg-[var(--bg-primary)] rounded-xl p-4 border border-[var(--border-color)]"
-                  >
-                    <div className="flex items-center gap-2 mb-1">
-                      <div
-                        className={`w-2.5 h-2.5 rounded-full ${
-                          status.available ? "bg-green-400" : "bg-red-400"
+                engineStatuses.map((status) => {
+                  const ready = status.available && status.auth_state === "ready";
+                  const label = !status.available
+                    ? "未安装"
+                    : ready
+                      ? "就绪"
+                      : status.auth_state === "unknown"
+                        ? "检测中…"
+                        : "未就绪";
+                  const dot = !status.available
+                    ? "bg-red-400"
+                    : ready
+                      ? "bg-green-400"
+                      : "bg-amber-400";
+                  return (
+                    <div
+                      key={status.id}
+                      className="flex items-center justify-between bg-[var(--bg-primary)] rounded-xl px-4 py-3 border border-[var(--border-color)]"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className={`w-2.5 h-2.5 rounded-full shrink-0 ${dot}`} />
+                        <span className="text-sm font-medium text-[var(--text-primary)] truncate">
+                          {status.display_name}
+                        </span>
+                      </div>
+                      <span
+                        className={`text-xs shrink-0 ${
+                          ready ? "text-emerald-400" : "text-[var(--text-secondary)]"
                         }`}
-                      />
-                      <span className="text-sm font-medium text-[var(--text-primary)]">
-                        {status.display_name}
+                      >
+                        {label}
                       </span>
                     </div>
-                    {status.version && (
-                      <p className="text-xs text-[var(--text-secondary)]">
-                        Version: {status.version}
-                      </p>
-                    )}
-                    {status.path && (
-                      <p className="text-xs text-[var(--text-secondary)] break-all">
-                        Path: {status.path}
-                      </p>
-                    )}
-                    {status.error && (
-                      <p className="text-xs text-red-400">{status.error}</p>
-                    )}
-                  </div>
-                ))
+                  );
+                })
               ) : (
                 <p className="text-sm text-[var(--text-secondary)]">Checking...</p>
               )}
-              <button
-                onClick={handleRefresh}
-                disabled={_checking}
-                className="px-3 py-1.5 rounded-lg bg-[var(--bg-tertiary)] hover:bg-[var(--accent)]/20 text-xs text-[var(--text-primary)] transition-colors disabled:opacity-50"
-              >
-                {_checking ? "Checking..." : "Refresh"}
-              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={onOpenSetup}
+                  className="px-3 py-1.5 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-xs font-medium transition-colors"
+                >
+                  配置引擎环境
+                </button>
+                <button
+                  onClick={handleRefresh}
+                  disabled={_checking}
+                  className="px-3 py-1.5 rounded-lg bg-[var(--bg-tertiary)] hover:bg-[var(--accent)]/20 text-xs text-[var(--text-primary)] transition-colors disabled:opacity-50"
+                >
+                  {_checking ? "Checking..." : "Refresh"}
+                </button>
+              </div>
             </div>
           </section>
 
@@ -150,7 +169,7 @@ export default function Settings({
               onChange={(e) => onDefaultEngineChange(e.target.value as AgentEngineId)}
               className="w-full text-sm rounded-xl px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-color)] text-[var(--text-primary)]"
             >
-              {AGENT_ENGINES.map((e) => (
+              {AGENT_ENGINES.filter((e) => readyEngineIds.includes(e.id)).map((e) => (
                 <option key={e.id} value={e.id}>
                   {e.label}
                 </option>

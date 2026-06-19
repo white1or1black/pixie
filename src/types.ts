@@ -78,6 +78,15 @@ export const AGENT_ENGINES: { id: AgentEngineId; label: string }[] = [
   { id: "codebuddy", label: "CodeBuddy" },
 ];
 
+/** Readiness/auth state of an engine, set by the backend probe. Mirrors the
+ *  Rust `AuthState` enum (serde `snake_case`). `unknown` until a probe runs. */
+export type AuthState =
+  | "unknown"
+  | "ready"
+  | "not_authenticated"
+  | "error"
+  | "no_response";
+
 export interface EngineStatus {
   id: AgentEngineId;
   display_name: string;
@@ -85,6 +94,10 @@ export interface EngineStatus {
   version?: string;
   path?: string;
   error?: string;
+  /** Result of the readiness ping probe. Absent on older cached values. */
+  auth_state?: AuthState;
+  /** Raw engine message for a non-`ready` probe outcome. */
+  probe_error?: string | null;
 }
 
 /** @deprecated Use EngineStatus — kept for gradual migration */

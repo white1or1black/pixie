@@ -278,6 +278,11 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
   const [workspaceFilter, setWorkspaceFilter] = useState<string | null>(null);
   const [generatingIds, setGeneratingIds] = useState<Set<string>>(new Set());
   const [engineStatuses, setEngineStatuses] = useState<EngineStatus[] | null>(null);
+  /** Engine ids that have passed a readiness probe before (persisted). Lets a
+   *  returning user enter the app without re-running a billable ping on launch. */
+  const [knownReadyEngines, setKnownReadyEngines] = useState<AgentEngineId[]>(() =>
+    getConfig().knownReadyEngines,
+  );
   const [defaultEngine, setDefaultEngine] = useState<AgentEngineId>(
     () => getConfig().defaultEngine,
   );
@@ -1042,14 +1047,98 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
 
   const refreshEngineStatuses = useCallback(async () => {
     try {
-      const statuses = await invoke<EngineStatus[]>("check_engines_available");
-      setEngineStatuses(statuses);
+      const fresh = await invoke<EngineStatus[]>("check_engines_available");
+      setEngineStatuses((prev) => {
+        if (!prev) return fresh;
+        // Preserve the probed auth_state across a cheap binary re-check, so
+        // clicking "Refresh" doesn't wipe the login status back to "unknown".
+        // Only reset to unknown when availability actually changed.
+        return fresh.map((s) => {
+          const old = prev.find((p) => p.id === s.id);
+          if (old && old.available === s.available) {
+            return { ...s, auth_state: old.auth_state, probe_error: old.probe_error };
+          }
+          return s;
+        });
+      });
     } catch {
       setEngineStatuses(null);
     }
   }, []);
 
+  /** Run a readiness ping probe for one engine and merge the result into the
+   *  statuses. A `ready` outcome is persisted into `knownReadyEngines` so the
+   *  user skips the probe next launch; a non-ready outcome clears it. */
+  const probeEngineStatus = useCallback(async (engineId: AgentEngineId) => {
+    try {
+      // Race the backend probe against a frontend deadline. The backend has its
+      // own 60s timeout, but if the invoke is dropped (e.g. dev HMR remount)
+      // the await would never resolve and the spinner would spin forever.
+      const status = await Promise.race([
+        invoke<EngineStatus>("probe_engine", { engine: engineId }),
+        new Promise<EngineStatus>((_, reject) =>
+          setTimeout(() => reject(new Error("probe deadline")), 70_000),
+        ),
+      ]);
+      setEngineStatuses((prev) =>
+        (prev ?? []).map((s) => (s.id === engineId ? status : s)),
+      );
+      setKnownReadyEngines((prev) => {
+        const has = prev.includes(engineId);
+        if (status.auth_state === "ready") {
+          if (has) return prev;
+          const next = [...prev, engineId];
+          updateConfig({ knownReadyEngines: next });
+          return next;
+        }
+        if (has) {
+          const next = prev.filter((e) => e !== engineId);
+          updateConfig({ knownReadyEngines: next });
+          return next;
+        }
+        return prev;
+      });
+    } catch (e) {
+      console.error("[probe_engine] failed", engineId, e);
+      // Probe didn't resolve (dropped / deadline) — clear the spinner so the
+      // user can retry, instead of spinning forever.
+      setEngineStatuses((prev) =>
+        (prev ?? []).map((s) =>
+          s.id === engineId
+            ? { ...s, auth_state: "no_response", probe_error: "检测未返回，请点重新检测重试" }
+            : s,
+        ),
+      );
+    }
+  }, []);
+
+  /** One-click login: spawn the engine's login command (opens a browser). */
+  const engineLogin = useCallback(async (engineId: AgentEngineId) => {
+    try {
+      await invoke("engine_login", { engine: engineId });
+    } catch (e) {
+      console.error("[engine_login] failed", engineId, e);
+    }
+  }, []);
+
   const anyEngineAvailable = (engineStatuses ?? []).some((s) => s.available);
+
+  /** At least one engine is logged in and working (or was last session — see
+   *  knownReadyEngines). The app gate uses this instead of mere availability so
+   *  an installed-but-not-logged-in user is kept on the setup screen. */
+  const anyEngineReady = (engineStatuses ?? []).some(
+    (s) => s.available && (s.auth_state === "ready" || knownReadyEngines.includes(s.id)),
+  );
+
+  /** Engine ids that are usable right now (installed + ready). Engine/model
+   *  selectors filter to this so a not-ready engine can't be picked. */
+  const readyEngineIds = useMemo(
+    () =>
+      (engineStatuses ?? [])
+        .filter((s) => s.available && (s.auth_state === "ready" || knownReadyEngines.includes(s.id)))
+        .map((s) => s.id as AgentEngineId),
+    [engineStatuses, knownReadyEngines],
+  );
 
   return {
     unifiedConversations,
@@ -1080,6 +1169,10 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
     stopGeneration,
     respondPermission,
     refreshEngineStatuses,
+    probeEngineStatus,
+    engineLogin,
+    anyEngineReady,
+    readyEngineIds,
     clearError,
     addScheduledRun,
     addRunningTask,

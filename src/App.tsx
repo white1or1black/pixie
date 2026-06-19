@@ -18,6 +18,8 @@ const ScheduledTasksPanel = lazy(() => import("./components/ScheduledTasksPanel"
 const FileExplorer = lazy(() => import("./components/RightPanel"));
 import { useScheduledTasks } from "./hooks/useScheduledTasks";
 import type {
+  AgentEngineId,
+  AuthState,
   EngineModelConfigs,
   PreviewRequest,
   PreviewTarget,
@@ -25,6 +27,7 @@ import type {
   TaskRunRecord,
   EngineStatus,
 } from "./types";
+import { AGENT_ENGINES } from "./types";
 import { bootstrap, getConfig, updateConfig } from "./lib/storage";
 
 // Brand mark — same art as the app/README icon.
@@ -56,38 +59,223 @@ function SplashScreen() {
   );
 }
 
-function NoEngineAvailable({
+/// Per-engine install + login commands shown on the setup screen. Cursor has no
+/// official npm package — its install is the curl script from cursor.com/cli.
+const ENGINE_SETUP_INFO: Record<
+  AgentEngineId,
+  { install: string; login: string; loginHint?: string; docs: string }
+> = {
+  claude: {
+    install: "npm install -g @anthropic-ai/claude-code",
+    login: "claude auth login",
+    loginHint: "浏览器完成 Anthropic 登录后回来点「重新检测」",
+    docs: "https://docs.claude.com/en/docs/claude-code",
+  },
+  cursor: {
+    install: "curl https://cursor.com/install -fsS | bash",
+    login: "cursor-agent login",
+    loginHint: "会打开浏览器完成 Cursor 登录",
+    docs: "https://cursor.com/cli",
+  },
+  codebuddy: {
+    install: "npm install -g @tencent-ai/codebuddy-code",
+    login: "cbc login",
+    loginHint: "选择登录方式，浏览器完成认证",
+    docs: "https://www.codebuddy.ai/docs/cli/quickstart",
+  },
+};
+
+function CommandRow({ command, label }: { command: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="flex items-center gap-2">
+      <code className="flex-1 text-xs font-mono text-[var(--text-primary)] bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg px-3 py-2 overflow-x-auto whitespace-nowrap">
+        {command}
+      </code>
+      <button
+        onClick={() => {
+          navigator.clipboard
+            .writeText(command)
+            .then(() => {
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1500);
+            })
+            .catch(() => {});
+        }}
+        className="shrink-0 px-3 py-2 rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-primary)] text-xs font-medium transition-colors hover:opacity-80"
+      >
+        {copied ? "已复制" : label}
+      </button>
+    </div>
+  );
+}
+
+function EngineCard({
+  engineId,
+  label,
+  status,
+  onProbe,
+  onLogin,
+}: {
+  engineId: AgentEngineId;
+  label: string;
+  status: EngineStatus | undefined;
+  onProbe: (id: AgentEngineId) => void;
+  onLogin: (id: AgentEngineId) => void;
+}) {
+  const info = ENGINE_SETUP_INFO[engineId];
+  const installed = !!status?.available;
+  const authState: AuthState = status?.auth_state ?? "unknown";
+  const ready = installed && authState === "ready";
+  const notReady = installed && !ready;
+  const probing = installed && authState === "unknown";
+
+  return (
+    <div className="border border-[var(--border-color)] rounded-xl p-4 bg-[var(--bg-primary)]">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="text-sm font-semibold text-[var(--text-primary)] truncate">{label}</span>
+          {installed && status?.version && (
+            <span className="text-[10px] text-[var(--text-secondary)] shrink-0">v{status.version}</span>
+          )}
+        </div>
+        {installed ? (
+          <span
+            className={`text-xs font-medium px-2 py-0.5 rounded-full shrink-0 ${
+              ready
+                ? "text-emerald-400 bg-emerald-500/10"
+                : "text-amber-400 bg-amber-500/10"
+            }`}
+          >
+            {ready ? "就绪" : probing ? "检测中…" : "未就绪"}
+          </span>
+        ) : (
+          <span className="text-xs font-medium px-2 py-0.5 rounded-full text-[var(--text-secondary)] bg-[var(--bg-tertiary)] shrink-0">
+            未安装
+          </span>
+        )}
+      </div>
+
+      {!installed && (
+        <div className="space-y-2">
+          <p className="text-xs text-[var(--text-secondary)]">在终端运行安装命令：</p>
+          <CommandRow command={info.install} label="复制" />
+        </div>
+      )}
+
+      {probing && (
+        <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+          <div className="w-3.5 h-3.5 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" />
+          正在发送 ping 检测就绪状态…
+        </div>
+      )}
+
+      {ready && <p className="text-xs text-emerald-400">已就绪，可以使用。</p>}
+
+      {notReady && !probing && (
+        <div className="space-y-2">
+          <p className="text-xs text-amber-400">未就绪。点「一键登录」在浏览器登录，完成后点「重新检测」。</p>
+          <div className="flex gap-2">
+            <button
+              onClick={() => onLogin(engineId)}
+              className="px-3 py-1.5 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-xs font-medium transition-colors"
+            >
+              一键登录
+            </button>
+            <button
+              onClick={() => onProbe(engineId)}
+              className="px-3 py-1.5 rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-primary)] text-xs font-medium transition-colors hover:opacity-80"
+            >
+              重新检测
+            </button>
+          </div>
+          <CommandRow command={info.login} label="复制登录命令" />
+          {info.loginHint && (
+            <p className="text-[11px] text-[var(--text-secondary)]">{info.loginHint}</p>
+          )}
+          {status?.probe_error && (
+            <p className="text-[11px] text-[var(--text-secondary)] break-all">
+              引擎返回：{status.probe_error}
+            </p>
+          )}
+        </div>
+      )}
+
+      {installed && ready && (
+        <div className="flex justify-end mt-1">
+          <button
+            onClick={() => onProbe(engineId)}
+            className="text-xs px-3 py-1.5 rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-primary)] font-medium transition-colors hover:opacity-80"
+          >
+            重新检测
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EngineSetup({
   statuses,
-  onRetry,
+  onProbe,
+  onLogin,
+  onClose,
 }: {
   statuses: EngineStatus[];
-  onRetry: () => void;
+  onProbe: (id: AgentEngineId) => void;
+  onLogin: (id: AgentEngineId) => void;
+  onClose: () => void;
 }) {
+  const anyReady = statuses.some((s) => s.available && s.auth_state === "ready");
   return (
-    <div className="flex flex-col items-center justify-center h-screen bg-[var(--bg-primary)] px-6">
-      <div className="w-16 h-16 rounded-2xl bg-red-500/10 flex items-center justify-center mb-6">
-        <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
-          <path d="M16 4L2 28h28L16 4z" stroke="#ef4444" strokeWidth="2" fill="none" />
-          <path d="M16 12v8M16 22v2" stroke="#ef4444" strokeWidth="2" strokeLinecap="round" />
-        </svg>
-      </div>
-      <h2 className="text-xl font-semibold text-[var(--text-primary)] mb-2">No Agent Engine Available</h2>
-      <p className="text-sm text-[var(--text-secondary)] text-center max-w-md mb-4">
-        Install at least one agent CLI (Claude Code or Cursor Agent) to use Pixie.
-      </p>
-      <div className="w-full max-w-md space-y-2 mb-4">
-        {statuses.map((s) => (
-          <div key={s.id} className="text-xs text-[var(--text-secondary)] border border-[var(--border-color)] rounded-lg px-3 py-2">
-            <span className="font-medium text-[var(--text-primary)]">{s.display_name}</span>
-            {" — "}
-            {s.available ? "available" : s.error ?? "not found"}
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+      <div className="w-full max-w-2xl max-h-[90vh] flex flex-col bg-[var(--bg-secondary)] rounded-2xl border border-[var(--border-color)] shadow-2xl">
+        <div className="shrink-0 flex items-center justify-between px-5 py-4 border-b border-[var(--border-color)]">
+          <div className="flex items-center gap-2">
+            <img src={iconUrl} alt="Pixie" className="w-7 h-7 rounded-lg" />
+            <h2 className="text-base font-semibold text-[var(--text-primary)]">配置 Agent 引擎</h2>
           </div>
-        ))}
-      </div>
-      <div className="flex gap-3">
-        <button onClick={onRetry} className="px-4 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-sm font-medium transition-colors">Retry</button>
-        <a href="https://docs.anthropic.com/en/docs/claude-code" target="_blank" rel="noopener noreferrer" className="px-4 py-2 rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-primary)] text-sm font-medium transition-colors hover:opacity-80">Claude Code</a>
-        <a href="https://cursor.com/docs/cli/overview" target="_blank" rel="noopener noreferrer" className="px-4 py-2 rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-primary)] text-sm font-medium transition-colors hover:opacity-80">Cursor CLI</a>
+          <button
+            onClick={onClose}
+            className="p-1.5 rounded-lg hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)] transition-colors"
+            aria-label="关闭"
+          >
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+              <path d="M4 4L14 14M14 4L4 14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-5 space-y-3">
+          <p className="text-sm text-[var(--text-secondary)] mb-2">
+            Pixie 不自带模型，安装并登录一个引擎即可。检测就绪 = 能成功 ping 通该模型。
+          </p>
+          {AGENT_ENGINES.map((e) => (
+            <EngineCard
+              key={e.id}
+              engineId={e.id}
+              label={e.label}
+              status={statuses.find((s) => s.id === e.id)}
+              onProbe={onProbe}
+              onLogin={onLogin}
+            />
+          ))}
+          <p className="text-[11px] text-[var(--text-secondary)] pt-1">
+            提示：检测会向引擎发送一条 ping 消息，可能产生极少量调用费用。
+          </p>
+        </div>
+
+        <div className="shrink-0 flex items-center justify-between px-5 py-3 border-t border-[var(--border-color)]">
+          <span className={`text-xs ${anyReady ? "text-emerald-400" : "text-[var(--text-secondary)]"}`}>
+            {anyReady ? "已有引擎就绪" : "还没有就绪的引擎"}
+          </span>
+          <button
+            onClick={onClose}
+            className="px-4 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-sm font-medium transition-colors"
+          >
+            进入应用
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -116,6 +304,14 @@ function AppShell() {
   // switching between them never clears what you've typed.
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  /** Engine-setup modal visibility. Auto-opens on first launch when no engine is
+   *  ready; otherwise opened manually from Settings. Does NOT auto-close when an
+   *  engine becomes ready — the user closes it (so they can see the state flip). */
+  const [setupOpen, setSetupOpen] = useState(false);
+  /** Has the first-launch "auto-open if nothing ready" check run yet. Tracked
+   *  with state (not a ref) so it can drive a render-time setState — the React
+   *  "adjust state during render" pattern — without tripping effect/ref rules. */
+  const [initialChecked, setInitialChecked] = useState(false);
 
   const {
     unifiedConversations,
@@ -124,7 +320,10 @@ function AppShell() {
     isGenerating,
     generatingIds,
     engineStatuses,
-    anyEngineAvailable,
+    anyEngineReady,
+    readyEngineIds,
+    probeEngineStatus,
+    engineLogin,
     defaultEngine,
     setDefaultEngine,
     defaultWorkspacePath,
@@ -150,6 +349,33 @@ function AppShell() {
     addScheduledRun,
     addRunningTask,
   } = useChat(engineModelConfigs);
+
+  // On first launch: if no engine is ready (none installed, or none logged in),
+  // pop the engine-setup modal automatically. Evaluated exactly once via the
+  // React "adjust state during render" pattern — after this the modal is only
+  // opened manually from Settings, and it does NOT auto-close when an engine
+  // later becomes ready.
+  if (!initialChecked && engineStatuses !== null) {
+    setInitialChecked(true);
+    if (!anyEngineReady) setSetupOpen(true);
+  }
+
+  // Probe any installed engine whose readiness is still unknown — on first load
+  // and whenever the setup modal opens (so a dropped/stale probe is retried
+  // instead of leaving the card stuck on "检测中"). The in-flight guard prevents
+  // concurrent duplicate pings; resolved engines (auth_state != unknown) are
+  // skipped, so there is no re-probe loop.
+  const probingSetupRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!engineStatuses) return;
+    for (const s of engineStatuses) {
+      if (!s.available) continue;
+      if ((s.auth_state ?? "unknown") !== "unknown") continue;
+      if (probingSetupRef.current.has(s.id)) continue;
+      probingSetupRef.current.add(s.id);
+      void probeEngineStatus(s.id).finally(() => probingSetupRef.current.delete(s.id));
+    }
+  }, [engineStatuses, setupOpen, probeEngineStatus]);
 
   // Per-conversation composer draft. Keyed by the active conversation id so each
   // session keeps its own input; a workspace-level scratch key covers the brief
@@ -294,12 +520,16 @@ function AppShell() {
     return <SplashScreen />;
   }
 
-  if (!anyEngineAvailable) {
-    return <NoEngineAvailable statuses={engineStatuses} onRetry={refreshEngineStatuses} />;
-  }
-
   return (
     <div className="flex h-screen overflow-hidden bg-[var(--bg-primary)] text-[var(--text-primary)]">
+      {setupOpen && (
+        <EngineSetup
+          statuses={engineStatuses}
+          onProbe={probeEngineStatus}
+          onLogin={engineLogin}
+          onClose={() => setSetupOpen(false)}
+        />
+      )}
       <Sidebar
         entries={unifiedConversations}
         workspaces={workspaces}
@@ -317,8 +547,8 @@ function AppShell() {
         }}
         defaultEngine={defaultEngine}
         onDefaultEngineChange={setDefaultEngine}
-        engineStatuses={engineStatuses}
         engineModelConfigs={engineModelConfigs}
+        readyEngineIds={readyEngineIds}
         onDelete={deleteConversation}
         onRename={renameConversation}
         onAddWorkspace={addWorkspace}
@@ -500,7 +730,9 @@ function AppShell() {
           <Suspense fallback={<LoadingPanel />}>
           <Settings
             engineStatuses={engineStatuses}
+            readyEngineIds={readyEngineIds}
             onRefreshStatus={refreshEngineStatuses}
+            onOpenSetup={() => setSetupOpen(true)}
             defaultEngine={defaultEngine}
             onDefaultEngineChange={setDefaultEngine}
             theme={theme}

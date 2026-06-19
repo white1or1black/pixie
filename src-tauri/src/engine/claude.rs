@@ -82,33 +82,64 @@ pub async fn check_available() -> EngineStatus {
         Ok(path) => {
             let path_str = path.display().to_string();
             match get_claude_version().await {
-                Ok(version) => EngineStatus {
-                    id: "claude".into(),
-                    display_name: "Claude Code".into(),
-                    available: true,
-                    version: Some(version),
-                    path: Some(path_str),
-                    error: None,
-                },
-                Err(e) => EngineStatus {
-                    id: "claude".into(),
-                    display_name: "Claude Code".into(),
-                    available: true,
-                    version: None,
-                    path: Some(path_str),
-                    error: Some(e.to_string()),
-                },
+                Ok(version) => EngineStatus::basic(
+                    "claude",
+                    "Claude Code",
+                    true,
+                    Some(version),
+                    Some(path_str),
+                    None,
+                ),
+                Err(e) => EngineStatus::basic(
+                    "claude",
+                    "Claude Code",
+                    true,
+                    None,
+                    Some(path_str),
+                    Some(e.to_string()),
+                ),
             }
         }
-        Err(e) => EngineStatus {
-            id: "claude".into(),
-            display_name: "Claude Code".into(),
-            available: false,
-            version: None,
-            path: None,
-            error: Some(e.to_string()),
-        },
+        Err(e) => EngineStatus::basic(
+            "claude",
+            "Claude Code",
+            false,
+            None,
+            None,
+            Some(e.to_string()),
+        ),
     }
+}
+
+/// Spawn a one-shot Claude process for the readiness probe. Minimal flags plus a
+/// tiny prompt; stderr is captured by `shared::spawn_probe_child` so an auth
+/// failure surfaces for classification. No `--session-id` — this turn is
+/// throwaway and must not pollute the persistent-session map.
+///
+/// `--verbose` is REQUIRED: current Claude Code rejects `--print` +
+/// `--output-format stream-json` without it ("requires --verbose"). The
+/// persistent-session spawn uses the same combination (see `persistent.rs`).
+pub async fn spawn_probe() -> Result<Child> {
+    let binary = find_claude_binary()?;
+    let env = collect_env().await;
+    let args: Vec<String> = vec![
+        "--print".into(),
+        "--output-format".into(),
+        "stream-json".into(),
+        "--verbose".into(),
+        "--permission-mode".into(),
+        "bypassPermissions".into(),
+    ];
+    shared::spawn_probe_child(binary, &args, "ping", None, &env).await
+}
+
+/// Spawn the one-click login flow (`claude auth login`), which opens a browser
+/// for OAuth. Fire-and-forget; the user re-probes after completing login.
+pub async fn spawn_login() -> Result<()> {
+    let binary = find_claude_binary()?;
+    let env = collect_env().await;
+    let args: Vec<String> = vec!["auth".into(), "login".into()];
+    shared::spawn_detached(binary, &args, &env).await
 }
 
 pub async fn run_claude_command(args: Vec<String>) -> Result<String> {

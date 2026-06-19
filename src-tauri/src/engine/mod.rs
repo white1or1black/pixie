@@ -8,7 +8,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::Mutex;
 
@@ -42,6 +43,34 @@ pub fn engine_display_name(id: &str) -> &'static str {
     }
 }
 
+/// How far an engine has been verified, beyond the cheap binary check.
+///
+/// `check_available` only confirms the binary exists and runs `--version`; it
+/// leaves `auth_state` at `Unknown`. A real readiness probe (`probe_engine`)
+/// sends a tiny "ping" turn and classifies the outcome:
+/// - `Ready` — the ping returned a result; the engine is logged in and usable.
+/// - `NotAuthenticated` — the ping failed with an auth-shaped error (heuristic
+///   string match; not exact — see `classify_probe_error`).
+/// - `Error` — the ping failed for some other reason (the raw text is in
+///   `EngineStatus::probe_error`).
+/// - `NoResponse` — the probe produced no terminal event before the timeout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthState {
+    #[default]
+    Unknown,
+    Ready,
+    NotAuthenticated,
+    Error,
+    NoResponse,
+}
+
+/// Wall-clock budget for a readiness probe before we give up as `NoResponse`.
+/// Generous on purpose: the first call right after a fresh login (token
+/// refresh + model/telemetry fetch) can be slow, and we'd rather wait than
+/// wrongly report "not ready".
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineStatus {
     pub id: String,
@@ -50,6 +79,37 @@ pub struct EngineStatus {
     pub version: Option<String>,
     pub path: Option<String>,
     pub error: Option<String>,
+    /// Result of the readiness/auth probe. `Unknown` until `probe_engine` runs.
+    #[serde(default)]
+    pub auth_state: AuthState,
+    /// Raw engine message accompanying a non-`Ready` probe outcome.
+    #[serde(default)]
+    pub probe_error: Option<String>,
+}
+
+impl EngineStatus {
+    /// Build a status from the cheap binary/version check only (auth not probed).
+    /// Centralizes the `auth_state = Unknown` default so engine modules don't
+    /// repeat the new fields in every `check_available` arm.
+    pub fn basic(
+        id: &str,
+        display_name: &str,
+        available: bool,
+        version: Option<String>,
+        path: Option<String>,
+        error: Option<String>,
+    ) -> Self {
+        Self {
+            id: id.to_string(),
+            display_name: display_name.to_string(),
+            available,
+            version,
+            path,
+            error,
+            auth_state: AuthState::Unknown,
+            probe_error: None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -190,19 +250,19 @@ pub fn parse_line(engine_id: &str, line: &str) -> Vec<NormalizedEvent> {
 }
 
 pub async fn check_engine(id: &str) -> EngineStatus {
-    let display_name = engine_display_name(id).to_string();
+    let display_name = engine_display_name(id);
     match id {
         "claude" => claude::check_available().await,
         "codebuddy" => codebuddy::check_available().await,
         "cursor" => cursor::check_available().await,
-        _ => EngineStatus {
-            id: id.to_string(),
+        _ => EngineStatus::basic(
+            id,
             display_name,
-            available: false,
-            version: None,
-            path: None,
-            error: Some(format!("unknown engine: {id}")),
-        },
+            false,
+            None,
+            None,
+            Some(format!("unknown engine: {id}")),
+        ),
     }
 }
 
@@ -212,6 +272,213 @@ pub async fn check_all_engines() -> Vec<EngineStatus> {
         out.push(check_engine(id).await);
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Readiness / auth probe
+//
+// Beyond the cheap binary check, we verify an engine actually works by sending
+// a one-shot "ping" turn and classifying the result. This is the only reliable,
+// engine-agnostic way to tell "logged in" from "not logged in": the credential
+// stores differ per engine (Claude hides them in the macOS Keychain and may not
+// even write `.credentials.json`), so we never inspect them — we just ask the
+// engine to do something and watch what comes back.
+// ---------------------------------------------------------------------------
+
+/// Outcome of a readiness probe.
+#[derive(Debug, Clone)]
+pub struct ProbeOutcome {
+    pub state: AuthState,
+    pub error: Option<String>,
+}
+
+impl ProbeOutcome {
+    fn ready() -> Self {
+        Self {
+            state: AuthState::Ready,
+            error: None,
+        }
+    }
+
+    /// Classify a free-text failure message (from an `error` stream event or
+    /// captured stderr) into `NotAuthenticated` vs `Error`, keeping the raw text.
+    fn from_message(msg: &str) -> Self {
+        let cleaned = shared::strip_ansi_and_controls(msg);
+        let trimmed = cleaned.trim();
+        Self {
+            state: classify_probe_error(trimmed),
+            error: Some(trimmed.to_string()),
+        }
+    }
+
+    fn error(msg: impl Into<String>) -> Self {
+        Self {
+            state: AuthState::Error,
+            error: Some(msg.into()),
+        }
+    }
+
+    fn no_response() -> Self {
+        Self {
+            state: AuthState::NoResponse,
+            error: Some("engine produced no response within the timeout".to_string()),
+        }
+    }
+}
+
+/// Heuristic: does this probe failure look like an auth/login problem?
+///
+/// The engines only give us free-text error messages (no structured code), so we
+/// match against a keyword list. This is deliberately **best-effort** — a future
+/// CLI version may rephrase an auth error, or a non-auth error may happen to
+/// contain a keyword. Callers always surface the raw `probe_error` alongside the
+/// label, so a misclassification stays recoverable for the user.
+fn classify_probe_error(message: &str) -> AuthState {
+    let lower = message.to_lowercase();
+    const EN: &[&str] = &[
+        "auth", "credential", "unauthorized", "forbidden", "401", "403", "api key",
+        "apikey", "api-key", "access token", "not logged in", "not signed in", "log in",
+        "sign in", "login", "signin",
+    ];
+    const ZH: &[&str] = &[
+        "鉴权", "未登录", "请登录", "请先登录", "登录", "凭证", "授权失败", "身份验证", "认证",
+    ];
+    if EN.iter().any(|k| lower.contains(k)) || ZH.iter().any(|k| message.contains(k)) {
+        AuthState::NotAuthenticated
+    } else {
+        AuthState::Error
+    }
+}
+
+/// Read a probe child's stream until a terminal event (`Final`/`Error`) is seen,
+/// the process exits, or the timeout elapses — then classify the outcome.
+///
+/// stderr is captured concurrently because auth failures often exit non-zero
+/// with the error on stderr *before* emitting any stream-json.
+pub async fn run_probe(engine_id: &str, mut child: Child) -> ProbeOutcome {
+    let start = Instant::now();
+    log::info!("[probe] {engine_id}: starting (pid {:?})", child.id());
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout = match stdout {
+        Some(s) => s,
+        None => {
+            log::warn!("[probe] {engine_id}: no stdout on child");
+            return ProbeOutcome::error("probe produced no stdout");
+        }
+    };
+
+    let stderr_task = tokio::spawn(async move {
+        let Some(stderr) = stderr else {
+            return String::new();
+        };
+        let mut reader = BufReader::new(stderr);
+        let mut buf = String::new();
+        let _ = reader.read_to_string(&mut buf).await;
+        buf
+    });
+
+    let reader = BufReader::new(stdout);
+    let mut lines = reader.lines();
+
+    // Scan stdout for the first terminal event. Bounded by PROBE_TIMEOUT.
+    let scanned = tokio::time::timeout(PROBE_TIMEOUT, async {
+        while let Some(line) = lines.next_line().await? {
+            if shared::is_ignorable_stream_line(&line) {
+                continue;
+            }
+            for evt in parse_line(engine_id, &line) {
+                match evt {
+                    NormalizedEvent::Final { .. } => return Ok(Some(ProbeOutcome::ready())),
+                    NormalizedEvent::Error { message } => {
+                        return Ok(Some(ProbeOutcome::from_message(&message)));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok::<_, std::io::Error>(None) // EOF with no terminal event
+    })
+    .await;
+
+    // Reap the child regardless of outcome (we may have broken out early).
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+
+    let stderr_buf = match tokio::time::timeout(Duration::from_millis(500), stderr_task).await {
+        Ok(Ok(s)) => s,
+        _ => String::new(),
+    };
+
+    let outcome = match scanned {
+        // A terminal event was seen on stdout.
+        Ok(Ok(Some(outcome))) => outcome,
+        // EOF with no terminal event: fall back to captured stderr (auth exits).
+        Ok(Ok(None)) => {
+            let msg = stderr_buf.trim();
+            if !msg.is_empty() {
+                ProbeOutcome::from_message(msg)
+            } else {
+                ProbeOutcome::error("engine produced no response")
+            }
+        }
+        // stdout read error: fall back to stderr if we have it.
+        Ok(Err(_io)) => {
+            let msg = stderr_buf.trim();
+            if !msg.is_empty() {
+                ProbeOutcome::from_message(msg)
+            } else {
+                ProbeOutcome::error("failed to read engine output")
+            }
+        }
+        // Timed out before any terminal event.
+        Err(_elapsed) => ProbeOutcome::no_response(),
+    };
+    log::info!(
+        "[probe] {engine_id}: {:?} after {}ms (stderr {} bytes, error: {:?})",
+        outcome.state,
+        start.elapsed().as_millis(),
+        stderr_buf.len(),
+        outcome.error
+    );
+    outcome
+}
+
+/// Probe a single engine's readiness: cheap-check first, and only if the binary
+/// is present, send a real "ping" turn and classify the response.
+pub async fn probe_engine(id: &str) -> EngineStatus {
+    let mut status = check_engine(id).await;
+    if !status.available {
+        // Binary missing — nothing to probe; auth_state stays Unknown.
+        return status;
+    }
+    let child = match id {
+        "claude" => claude::spawn_probe().await,
+        "codebuddy" => codebuddy::spawn_probe().await,
+        "cursor" => cursor::spawn_probe().await,
+        other => Err(anyhow::anyhow!("unknown engine: {other}")),
+    };
+    let outcome = match child {
+        Ok(c) => run_probe(id, c).await,
+        Err(e) => ProbeOutcome {
+            state: AuthState::Error,
+            error: Some(format!("failed to start probe: {e}")),
+        },
+    };
+    status.auth_state = outcome.state;
+    status.probe_error = outcome.error;
+    status
+}
+
+/// Spawn the one-click login flow for an engine (opens a browser). Fire-and-
+/// forget — the caller re-probes after the user completes login in the browser.
+pub async fn login(id: &str) -> Result<()> {
+    match id {
+        "claude" => claude::spawn_login().await,
+        "codebuddy" => codebuddy::spawn_login().await,
+        "cursor" => cursor::spawn_login().await,
+        other => anyhow::bail!("unknown engine: {other}"),
+    }
 }
 
 /// Fetch available models for a given engine.

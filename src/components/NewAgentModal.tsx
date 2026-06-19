@@ -1,6 +1,6 @@
 import { useMemo, useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { AgentEngineId, EngineModelConfigs, EngineStatus, ModelEntry, WorkspaceState } from "../types";
+import type { AgentEngineId, EngineModelConfigs, ModelEntry, WorkspaceState } from "../types";
 import { AGENT_ENGINES, ENGINE_MODEL_ENV_KEY } from "../types";
 import EngineBadge from "./EngineBadge";
 
@@ -12,8 +12,8 @@ export default function NewAgentModal({
   workspaces,
   defaultWorkspaceId,
   defaultEngine,
-  engineStatuses,
   engineModelConfigs,
+  readyEngineIds,
   onDefaultEngineChange,
   onCreate,
   onClose,
@@ -21,16 +21,19 @@ export default function NewAgentModal({
   workspaces: WorkspaceState[];
   defaultWorkspaceId: string | null;
   defaultEngine: AgentEngineId;
-  engineStatuses: EngineStatus[];
   engineModelConfigs: EngineModelConfigs;
+  /** Engines that are installed + ready; the picker is limited to these. */
+  readyEngineIds: AgentEngineId[];
   onDefaultEngineChange: (engine: AgentEngineId) => void;
   onCreate: (opts: { workspaceId: string; engine: AgentEngineId; model?: string }) => void;
   onClose: () => void;
 }) {
-  const availableEngines = useMemo(() => {
-    const available = new Set(engineStatuses.filter((s) => s.available).map((s) => s.id));
-    return AGENT_ENGINES.filter((e) => available.has(e.id));
-  }, [engineStatuses]);
+  // Only ready engines can be used — a not-ready (not installed / not logged in)
+  // engine is excluded from the picker entirely.
+  const availableEngines = useMemo(
+    () => AGENT_ENGINES.filter((e) => readyEngineIds.includes(e.id)),
+    [readyEngineIds],
+  );
 
   const firstAvailableEngine = availableEngines[0]?.id ?? defaultEngine;
   const firstWorkspace = workspaces[0]?.id ?? "";
@@ -39,8 +42,8 @@ export default function NewAgentModal({
     () => defaultWorkspaceId ?? firstWorkspace
   );
   const [selectedEngine, setSelectedEngine] = useState<AgentEngineId>(() => {
-    const isDefaultAvailable = engineStatuses.some((s) => s.id === defaultEngine && s.available);
-    return isDefaultAvailable ? defaultEngine : firstAvailableEngine;
+    const isDefaultReady = readyEngineIds.includes(defaultEngine);
+    return isDefaultReady ? defaultEngine : firstAvailableEngine;
   });
   const [selectedModel, setSelectedModel] = useState<string | undefined>(undefined);
   const [setAsDefaultEngine, setSetAsDefaultEngine] = useState(false);
@@ -232,15 +235,11 @@ export default function NewAgentModal({
               }}
               className="w-full text-xs rounded-lg px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-color)] text-[var(--text-primary)]"
             >
-              {AGENT_ENGINES.map((e) => {
-                const s = engineStatuses.find((x) => x.id === e.id);
-                const suffix = s?.available ? "" : " (unavailable)";
-                return (
-                  <option key={e.id} value={e.id} disabled={!s?.available}>
-                    {e.label}{suffix}
-                  </option>
-                );
-              })}
+              {availableEngines.map((e) => (
+                <option key={e.id} value={e.id}>
+                  {e.label}
+                </option>
+              ))}
             </select>
 
             <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)] select-none">

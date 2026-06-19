@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useRef, memo } from "react";
 import type { ConversationEntry } from "../hooks/useChat";
-import type { WorkspaceState, AgentEngineId, EngineStatus, EngineModelConfigs } from "../types";
+import type { WorkspaceState, AgentEngineId, EngineModelConfigs } from "../types";
 import { useDragRegion } from "../hooks/useDragRegion";
 import NewAgentModal from "./NewAgentModal";
 import EngineBadge from "./EngineBadge";
@@ -25,8 +25,9 @@ interface SidebarProps {
   onClose: () => void;
   defaultEngine: AgentEngineId;
   onDefaultEngineChange: (engine: AgentEngineId) => void;
-  engineStatuses: EngineStatus[];
   engineModelConfigs: EngineModelConfigs;
+  /** Engine ids that are installed + ready; the New Agent picker is limited to these. */
+  readyEngineIds: AgentEngineId[];
   defaultWorkspacePath: string;
 }
 
@@ -279,8 +280,8 @@ export default function Sidebar({
   onClose,
   defaultEngine,
   onDefaultEngineChange,
-  engineStatuses,
   engineModelConfigs,
+  readyEngineIds,
   defaultWorkspacePath,
 }: SidebarProps) {
   const [search, setSearch] = useState("");
@@ -303,6 +304,13 @@ export default function Sidebar({
 
   const [historyExpanded, setHistoryExpanded] = useState(false);
   const [newAgentModalOpen, setNewAgentModalOpen] = useState(false);
+
+  // The default engine may not be ready (e.g. the user logged it out since). The
+  // quick "New Agent" button must use a ready engine, otherwise it would create
+  // an unusable session.
+  const effectiveDefaultEngine: AgentEngineId = readyEngineIds.includes(defaultEngine)
+    ? defaultEngine
+    : (readyEngineIds[0] ?? defaultEngine);
 
   // The auto-created default workspace (the configured default working dir) is
   // hidden from the UI — it stays as the implicit CWD but never appears in the
@@ -588,12 +596,12 @@ export default function Sidebar({
           <div className="flex gap-1.5">
             <button
               type="button"
-              onClick={() => onNew({ workspaceId: newAgentTargetWs ?? undefined, engine: defaultEngine })}
+              onClick={() => onNew({ workspaceId: newAgentTargetWs ?? undefined, engine: effectiveDefaultEngine })}
               className="flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               disabled={!newAgentTargetWs}
               title={newAgentTargetWs ? "New agent (defaults)" : "Add a workspace first"}
             >
-              <EngineBadge engine={defaultEngine} tone="onAccent" />
+              <EngineBadge engine={effectiveDefaultEngine} tone="onAccent" />
               New Agent
             </button>
             <button
@@ -663,8 +671,8 @@ export default function Sidebar({
           workspaces={newAgentWorkspaceOptions}
           defaultWorkspaceId={newAgentTargetWs}
           defaultEngine={defaultEngine}
-          engineStatuses={engineStatuses}
           engineModelConfigs={engineModelConfigs}
+          readyEngineIds={readyEngineIds}
           onDefaultEngineChange={onDefaultEngineChange}
           onCreate={({ workspaceId, engine, model }) => {
             onNew({ workspaceId, engine, model });
