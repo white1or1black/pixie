@@ -25,6 +25,9 @@ export interface Message {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
+  /** Absolute paths of image attachments sent with this user message. Rendered
+   *  as thumbnails in the bubble; sent to the engine as image content blocks. */
+  images?: string[];
   timestamp: number;
   status?: "sending" | "streaming" | "done" | "error";
   tools?: ToolStep[];
@@ -50,9 +53,24 @@ export interface Conversation {
   updatedAt: number;
   /** Agent engine bound to this session. Defaults to claude for legacy data. */
   engine: AgentEngineId;
+  /** Per-conversation model override. When empty/undefined, uses the engine's global config. */
+  model?: string;
 }
 
 export type AgentEngineId = "claude" | "cursor" | "codebuddy";
+
+/** Env key that each engine uses for its model override in global config. */
+export const ENGINE_MODEL_ENV_KEY: Record<AgentEngineId, string> = {
+  claude: "ANTHROPIC_MODEL",
+  cursor: "CURSOR_MODEL",
+  codebuddy: "CODEBUDDY_MODEL",
+};
+
+/** A model entry returned by the backend's list_models command. */
+export interface ModelEntry {
+  id: string;
+  label: string;
+}
 
 export const AGENT_ENGINES: { id: AgentEngineId; label: string }[] = [
   { id: "claude", label: "Claude Code" },
@@ -189,7 +207,7 @@ export const ENGINE_MODEL_FIELDS: Record<
   claude: [
     { key: "ANTHROPIC_API_KEY", label: "API Key", secret: true },
     { key: "ANTHROPIC_BASE_URL", label: "Base URL" },
-    { key: "ANTHROPIC_MODEL", label: "Default Model" },
+    { key: "ANTHROPIC_MODEL", label: "Model" },
     { key: "ANTHROPIC_DEFAULT_OPUS_MODEL", label: "Opus Model" },
     { key: "ANTHROPIC_DEFAULT_SONNET_MODEL", label: "Sonnet Model" },
     { key: "ANTHROPIC_DEFAULT_HAIKU_MODEL", label: "Haiku Model" },
@@ -290,4 +308,54 @@ export interface TaskRunRecord {
   started_at: string;
   finished_at: string;
 }
+
+// ---------------------------------------------------------------------------
+// Structured git diff (parsed from raw `git diff` unified output)
+// ---------------------------------------------------------------------------
+
+export type DiffLineType = "context" | "add" | "delete";
+
+export interface DiffLine {
+  type: DiffLineType;
+  /** Line content with the leading +/-/space prefix already stripped. */
+  text: string;
+  /** 1-based line number in the NEW file (undefined on pure deletions). */
+  newNumber?: number;
+  /** 1-based line number in the OLD file (undefined on pure additions). */
+  oldNumber?: number;
+  /** True when the original line had no trailing newline ("\ No newline..."). */
+  noNewline?: boolean;
+}
+
+export interface DiffHunk {
+  /** Header, e.g. "@@ -10,5 +10,7 @@". */
+  header: string;
+  lines: DiffLine[];
+}
+
+export type DiffFileStatus = "added" | "modified" | "deleted" | "renamed";
+
+export interface DiffFile {
+  /** Display path (the new path, or the old path for deletions). */
+  path: string;
+  /** Previous path when the file was renamed/moved. */
+  oldPath?: string;
+  status: DiffFileStatus;
+  /** True for binary changes (no textual hunks). */
+  binary: boolean;
+  hunks: DiffHunk[];
+  /** Added line count across all hunks. */
+  additions: number;
+  /** Removed line count across all hunks. */
+  deletions: number;
+}
+
+export interface ParsedDiff {
+  files: DiffFile[];
+  /** True when no `diff --git` blocks could be parsed. */
+  empty: boolean;
+}
+
+/** Render mode for the diff viewer. */
+export type DiffViewMode = "unified" | "split";
 

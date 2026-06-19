@@ -83,7 +83,12 @@ pub fn candidate_paths() -> Vec<PathBuf> {
         }
     }
 
-    for p in &["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/snap/bin"] {
+    for p in &[
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+        "/usr/bin",
+        "/snap/bin",
+    ] {
         paths.push(PathBuf::from(p));
     }
 
@@ -125,11 +130,7 @@ pub fn find_binary(names: &[&str], tool_label: &str) -> anyhow::Result<PathBuf> 
 
 pub fn extend_path(env: &mut HashMap<String, String>) {
     if let Some(path) = env.get_mut("PATH") {
-        let extras = [
-            "/usr/local/bin",
-            "/opt/homebrew/bin",
-            "/opt/homebrew/sbin",
-        ];
+        let extras = ["/usr/local/bin", "/opt/homebrew/bin", "/opt/homebrew/sbin"];
         let existing: Vec<&str> = path.split(':').collect();
         let missing: Vec<&str> = extras
             .iter()
@@ -220,6 +221,46 @@ pub async fn run_with_env(
 
 pub const MAX_TOOL_RESULT_CHARS: usize = 8_000;
 
+/// Remove ANSI escape sequences (colors, cursor controls) and other control
+/// characters from a string. Useful when parsing CLI output that may contain
+/// terminal formatting codes (e.g. "\x1b[1m").
+pub fn strip_ansi_and_controls(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == 0x1b {
+            // ESC sequence. Common case: CSI "\x1b[ ... <final>"
+            i += 1;
+            if i < bytes.len() && bytes[i] == b'[' {
+                i += 1;
+                // Skip parameters/intermediates until a final byte (@..~).
+                while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1; // consume final byte
+                }
+                continue;
+            }
+            // Non-CSI escape: skip one byte if present.
+            if i < bytes.len() {
+                i += 1;
+            }
+            continue;
+        }
+        // Drop other ASCII control chars except whitespace we may want to keep.
+        if b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t' {
+            i += 1;
+            continue;
+        }
+        out.push(b);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
 pub fn truncate_text(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
@@ -244,9 +285,7 @@ pub fn u64_field(obj: &serde_json::Value, key: &str) -> u64 {
 
 pub fn extract_result_text(value: Option<&serde_json::Value>) -> Option<String> {
     match value {
-        Some(serde_json::Value::String(s)) => {
-            Some(truncate_text(s, MAX_TOOL_RESULT_CHARS))
-        }
+        Some(serde_json::Value::String(s)) => Some(truncate_text(s, MAX_TOOL_RESULT_CHARS)),
         Some(serde_json::Value::Array(arr)) => {
             let mut buf = String::new();
             for block in arr {

@@ -5,6 +5,7 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import type { Message, MessageUsage, PreviewRequest, ToolStep, PendingPermission } from "../types";
 import { isPreviewableFile } from "../preview";
+import { convertFileSrc } from "@tauri-apps/api/core";
 
 interface MessageBubbleProps {
   message: Message;
@@ -382,7 +383,7 @@ function ToolStepCardImpl({ step, onOpenPreview }: { step: ToolStep; onOpenPrevi
   }, [step.status]);
 
   const { label, target, open: openable } = describeTool(step);
-  const diffStat = useMemo(() => diffStats(step), [step.name, step.input]);
+  const diffStat = useMemo(() => diffStats(step), [step]);
   const isRunning = step.status === "running";
   const hasResult = Boolean(step.result);
   const lname = step.name.toLowerCase();
@@ -752,9 +753,25 @@ function MessageBubbleImpl({ message, onOpenPreview, onRespondPermission, conver
         }`}
       >
         {isUser ? (
-          <p className="whitespace-pre-wrap [overflow-wrap:anywhere] text-[var(--text-primary)] text-sm leading-relaxed m-0">
-            {message.content}
-          </p>
+          <div className="flex flex-col gap-2">
+            {message.images && message.images.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {message.images.map((p) => (
+                  <img
+                    key={p}
+                    src={convertFileSrc(p)}
+                    alt={p.split(/[/\\]/).pop() ?? p}
+                    className="max-w-[200px] max-h-[160px] rounded-lg object-cover border border-[var(--border-color)]"
+                  />
+                ))}
+              </div>
+            )}
+            {message.content && (
+              <p className="whitespace-pre-wrap [overflow-wrap:anywhere] text-[var(--text-primary)] text-sm leading-relaxed m-0">
+                {message.content}
+              </p>
+            )}
+          </div>
         ) : (
           <>
             {message.tools && message.tools.length > 0 && (

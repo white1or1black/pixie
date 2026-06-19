@@ -1,4 +1,4 @@
-use super::{EngineStatus, NormalizedEvent, ToolEvent, ToolEventKind, UsageInfo, shared};
+use super::{shared, EngineStatus, NormalizedEvent, ToolEvent, ToolEventKind, UsageInfo};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -61,6 +61,76 @@ pub async fn check_available() -> EngineStatus {
     }
 }
 
+/// Fetch available models from `cursor-agent --list-models`.
+pub async fn list_models() -> Vec<(String, String)> {
+    log::info!("[list_models] cursor: starting");
+    let binary = match find_cursor_binary() {
+        Ok(b) => b,
+        Err(e) => {
+            log::info!("[list_models] cursor: binary not found: {e}");
+            return vec![];
+        }
+    };
+    let env = collect_env().await;
+    let mut cmd = tokio::process::Command::new(&binary);
+    cmd.args(["--list-models"]);
+    for (k, v) in &env {
+        cmd.env(k, v);
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    shared::detach_from_controlling_terminal(&mut cmd);
+    log::info!("[list_models] cursor: spawning --list-models");
+    match tokio::time::timeout(std::time::Duration::from_secs(10), cmd.output()).await {
+        Ok(Ok(output)) => {
+            // Combine stdout and stderr in case the model list is on stderr.
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let combined = format!("{stdout}\n{stderr}");
+            let models = parse_model_list(&combined);
+            log::info!("[list_models] cursor: got {} models", models.len());
+            models
+        }
+        Ok(Err(e)) => {
+            log::warn!("[list_models] cursor: spawn error: {e}");
+            vec![]
+        }
+        Err(_) => {
+            log::warn!("[list_models] cursor: timed out after 10s");
+            vec![]
+        }
+    }
+}
+
+/// Parse output of `cursor-agent --list-models` into (id, label) pairs.
+/// Format: "model-id - Human Label" per line.
+fn parse_model_list(output: &str) -> Vec<(String, String)> {
+    let mut models = Vec::new();
+    let mut seen = std::collections::HashSet::<String>::new();
+    for line in output.lines() {
+        let line = shared::strip_ansi_and_controls(line);
+        let line = line.trim();
+        if line.is_empty() || line == "Available models" {
+            continue;
+        }
+        if let Some((id, label)) = line.split_once(" - ") {
+            let id = id.trim().to_string();
+            let label = label.trim().to_string();
+            if !id.is_empty() && seen.insert(id.clone()) {
+                models.push((id, label));
+            }
+        } else {
+            // No separator — use the whole line as both id and label.
+            let id = line.to_string();
+            if !id.is_empty() && seen.insert(id.clone()) {
+                models.push((id.clone(), id));
+            }
+        }
+    }
+    models
+}
+
 async fn spawn_with_args(args: Vec<String>, message: &str, cwd: Option<&str>) -> Result<Child> {
     let binary = find_cursor_binary()?;
     let env = collect_env().await;
@@ -85,8 +155,7 @@ async fn spawn_with_args(args: Vec<String>, message: &str, cwd: Option<&str>) ->
     // shared::detach_from_controlling_terminal.
     shared::detach_from_controlling_terminal(&mut cmd);
 
-    cmd.spawn()
-        .context("failed to spawn cursor-agent process")
+    cmd.spawn().context("failed to spawn cursor-agent process")
 }
 
 const STREAM_ARGS: &[&str] = &[
@@ -106,25 +175,30 @@ fn stream_args_with_model(model: Option<&str>) -> Vec<String> {
     args
 }
 
-async fn stream_args_from_env() -> Vec<String> {
+async fn stream_args_from_env(model_override: Option<&str>) -> Vec<String> {
     let env = collect_env().await;
-    stream_args_with_model(env.get("CURSOR_MODEL").map(String::as_str))
+    let model = model_override
+        .filter(|s| !s.is_empty())
+        .or_else(|| env.get("CURSOR_MODEL").map(String::as_str));
+    stream_args_with_model(model)
 }
 
 pub async fn spawn_single(
     _conversation_id: &str,
     message: &str,
     cwd: Option<&str>,
+    model: Option<&str>,
 ) -> Result<Child> {
-    spawn_with_args(stream_args_from_env().await, message, cwd).await
+    spawn_with_args(stream_args_from_env(model).await, message, cwd).await
 }
 
 pub async fn spawn_continue(
     session_id: &str,
     message: &str,
     cwd: Option<&str>,
+    model: Option<&str>,
 ) -> Result<Child> {
-    let mut args = stream_args_from_env().await;
+    let mut args = stream_args_from_env(model).await;
     args.push("--resume".into());
     args.push(session_id.into());
     spawn_with_args(args, message, cwd).await

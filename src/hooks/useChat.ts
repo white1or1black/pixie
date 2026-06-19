@@ -23,7 +23,11 @@ import type {
 import { AGENT_ENGINES } from "../types";
 import { getConfig, getHistory, setHistory, updateConfig } from "../lib/storage";
 
-const DEFAULT_WORKSPACE_NAME = "Default";
+function basename(p: string): string {
+  const norm = p.replace(/\\/g, "/");
+  const parts = norm.split("/").filter(Boolean);
+  return parts[parts.length - 1] ?? p;
+}
 
 function normalizeConversation(conv: Conversation): Conversation {
   return {
@@ -43,31 +47,42 @@ function generateId(): string {
 
 function generateTitle(content: string): string {
   const trimmed = content.trim().replace(/\n/g, " ");
-  if (trimmed.length <= 60) return trimmed;
-  return trimmed.slice(0, 57) + "...";
+  if (trimmed.length <= 30) return trimmed;
+  return trimmed.slice(0, 27) + "...";
 }
 
 function findWorkspaceForConversation(
-  all: Record<string, Conversation[]>,
+  _all: Record<string, Conversation[]>,
   convId: string,
+  indexRef: React.RefObject<Map<string, string>>,
 ): string | null {
-  for (const [wsId, convs] of Object.entries(all)) {
-    if (convs.some((c) => c.id === convId)) return wsId;
-  }
-  return null;
+  return indexRef.current?.get(convId) ?? null;
 }
 
 function patchConversation(
   prev: Record<string, Conversation[]>,
   convId: string,
   updater: (conv: Conversation) => Conversation,
+  indexRef: React.RefObject<Map<string, string>>,
 ): Record<string, Conversation[]> {
-  const wsId = findWorkspaceForConversation(prev, convId);
+  const wsId = findWorkspaceForConversation(prev, convId, indexRef);
   if (!wsId) return prev;
   return {
     ...prev,
     [wsId]: (prev[wsId] ?? []).map((c) => (c.id === convId ? updater(c) : c)),
   };
+}
+
+function rebuildConversationIndex(
+  all: Record<string, Conversation[]>,
+  index: Map<string, string>,
+): void {
+  index.clear();
+  for (const [wsId, convs] of Object.entries(all)) {
+    for (const c of convs) {
+      index.set(c.id, wsId);
+    }
+  }
 }
 
 /** Coalesce high-frequency stream events before touching React state. */
@@ -162,6 +177,7 @@ function applyStreamBatch(
   prev: Record<string, Conversation[]>,
   convId: string,
   batch: StreamBatch,
+  indexRef: React.RefObject<Map<string, string>>,
 ): Record<string, Conversation[]> {
   return patchConversation(prev, convId, (conv) => {
     const msgs = [...conv.messages];
@@ -205,7 +221,7 @@ function applyStreamBatch(
 
     msgs[msgs.length - 1] = updated;
     return { ...conv, messages: msgs, updatedAt: Date.now() };
-  });
+  }, indexRef);
 }
 
 function emptyStreamBatch(): StreamBatch {
@@ -272,6 +288,8 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
   const unlistenRefs = useRef<Array<() => void>>([]);
   const activeIdRef = useRef<string | null>(activeId);
   const allConversationsRef = useRef(allConversations);
+  /** Reverse index: conversationId → workspaceId for O(1) lookups. */
+  const convIndexRef = useRef<Map<string, string>>(new Map());
   const streamBatchesRef = useRef(new Map<string, StreamBatch>());
   const streamFlushScheduledRef = useRef(false);
   // Timestamp of the last streamed UI flush, for rate-limiting (see below).
@@ -307,7 +325,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
       setAllConversations((prev) => {
         let next = prev;
         for (const [convId, batch] of toFlush) {
-          next = applyStreamBatch(next, convId, batch);
+          next = applyStreamBatch(next, convId, batch, convIndexRef);
         }
         return next;
       });
@@ -350,6 +368,8 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
 
   useEffect(() => {
     allConversationsRef.current = allConversations;
+    // Rebuild the convId → wsId index whenever conversations change.
+    rebuildConversationIndex(allConversations, convIndexRef.current);
   }, [allConversations]);
 
   const activeWorkspace = useMemo(() => {
@@ -376,11 +396,14 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
 
   const activeConversation = useMemo(() => {
     if (!activeId) return null;
-    for (const { conversation } of unifiedConversations) {
-      if (conversation.id === activeId) return conversation;
+    // Avoid reading refs during render (eslint react-hooks/refs). Scan the
+    // conversations map to resolve the active conversation.
+    for (const convs of Object.values(allConversations)) {
+      const found = convs.find((c) => c.id === activeId);
+      if (found) return found;
     }
     return null;
-  }, [activeId, unifiedConversations]);
+  }, [activeId, allConversations]);
 
   const isGenerating = activeId ? generatingIds.has(activeId) : false;
 
@@ -444,7 +467,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
 
       let wsList = workspaces;
       if (wsList.length === 0 && configuredDefault) {
-        wsList = [{ id: configuredDefault, path: configuredDefault, name: DEFAULT_WORKSPACE_NAME }];
+        wsList = [{ id: configuredDefault, path: configuredDefault, name: basename(configuredDefault) }];
         conversations[configuredDefault] = conversations[configuredDefault] ?? [];
       }
       const legacyActivePath = raw.workspaces.find((w) => w.id === raw.activeWorkspaceId)?.path;
@@ -456,6 +479,9 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
 
       setWorkspaces(wsList);
       setActiveWorkspaceId(activeWorkspaceId);
+      // Keep the convId → wsId index in sync immediately so UI elements that
+      // depend on `activeConversation` (engine/model pickers) render right away.
+      rebuildConversationIndex(conversations, convIndexRef.current);
       setAllConversations(conversations);
 
       const convs = activeWorkspaceId ? (conversations[activeWorkspaceId] ?? []) : [];
@@ -541,6 +567,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
   // Listen to Tauri events — route updates by conversation_id, not active workspace.
   useEffect(() => {
     let mounted = true;
+    const batches = streamBatchesRef.current;
 
     async function setup() {
       const u1 = await listen<ResponseChunk>("agent-response", (event) => {
@@ -561,7 +588,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
               msgs[msgs.length - 1] = { ...last, content: done.full_text, status: "done", timestamp: Date.now() };
             }
             return { ...conv, messages: msgs, updatedAt: Date.now() };
-          }),
+          }, convIndexRef),
         );
         setGeneratingIds((prev) => {
           const next = new Set(prev);
@@ -584,7 +611,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
               msgs[msgs.length - 1] = { ...last, status: "error" };
             }
             return { ...conv, messages: msgs };
-          }),
+          }, convIndexRef),
         );
         setGeneratingIds((prev) => {
           const next = new Set(prev);
@@ -645,7 +672,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
               }
             }
             return { ...conv, messages: msgs };
-          }),
+          }, convIndexRef),
         );
       });
 
@@ -658,7 +685,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
       mounted = false;
       for (const fn of unlistenRefs.current) fn();
       unlistenRefs.current = [];
-      streamBatchesRef.current.clear();
+      batches.clear();
       streamFlushScheduledRef.current = false;
     };
   }, [queueStreamUpdate, flushStreamBatches]);
@@ -704,7 +731,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
     } catch { /* ignore */ }
   }, []);
 
-  const createConversation = useCallback((workspaceId?: string, engine?: AgentEngineId) => {
+  const createConversation = useCallback((workspaceId?: string, engine?: AgentEngineId, model?: string) => {
     const wsId = workspaceId ?? resolveTargetWorkspace();
     if (!wsId) return "";
     const id = generateId();
@@ -712,7 +739,10 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
       id, title: "New Agent", messages: [],
       createdAt: Date.now(), updatedAt: Date.now(),
       engine: engine ?? defaultEngine,
+      model,
     };
+    // Sync index immediately so `activeConversation` resolves on the next render.
+    convIndexRef.current.set(id, wsId);
     setAllConversations((prev) => ({
       ...prev,
       [wsId]: [conv, ...(prev[wsId] ?? [])],
@@ -725,14 +755,14 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
 
   const switchConversation = useCallback((id: string, workspaceId?: string) => {
     const wsId =
-      workspaceId ?? findWorkspaceForConversation(allConversationsRef.current, id);
+      workspaceId ?? findWorkspaceForConversation(allConversationsRef.current, id, convIndexRef);
     if (wsId) setActiveWorkspaceId(wsId);
     setActiveId(id);
     setError(null);
   }, []);
 
   const renameConversation = useCallback((id: string, newTitle: string) => {
-    const wsId = findWorkspaceForConversation(allConversationsRef.current, id);
+    const wsId = findWorkspaceForConversation(allConversationsRef.current, id, convIndexRef);
     if (!wsId) return;
     setAllConversations((prev) => ({
       ...prev,
@@ -743,10 +773,37 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
     // Title is persisted via the debounced history save (setHistory in the persist effect).
   }, []);
 
+  const setConversationModel = useCallback((id: string, model: string | undefined) => {
+    const wsId = findWorkspaceForConversation(allConversationsRef.current, id, convIndexRef);
+    if (!wsId) return;
+
+    // Update frontend state.
+    setAllConversations((prev) => ({
+      ...prev,
+      [wsId]: (prev[wsId] ?? []).map((c) =>
+        c.id === id ? { ...c, model } : c
+      ),
+    }));
+
+    // Notify the backend so it can update the model override and kill any
+    // existing persistent session (the next send_message will respawn with
+    // the new model).
+    const conv = allConversationsRef.current[wsId]?.find((c) => c.id === id);
+    const engine = conv?.engine;
+    invoke("update_conversation_model", {
+      conversationId: id,
+      model: model ?? null,
+      engine: engine ?? null,
+    }).catch((e) => {
+      console.error("[setConversationModel] backend call failed:", e);
+    });
+  }, []);
+
   const deleteConversation = useCallback((id: string, workspaceId?: string) => {
     const wsId =
-      workspaceId ?? findWorkspaceForConversation(allConversationsRef.current, id);
+      workspaceId ?? findWorkspaceForConversation(allConversationsRef.current, id, convIndexRef);
     if (!wsId) return;
+    convIndexRef.current.delete(id);
     setAllConversations((prev) => ({
       ...prev,
       [wsId]: (prev[wsId] ?? []).filter((c) => c.id !== id),
@@ -759,12 +816,12 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
   }, [activeId]);
 
   const sendMessage = useCallback(
-    async (content: string, convIdOverride?: string) => {
-      if (!content.trim()) return;
+    async (content: string, convIdOverride?: string, images?: string[]) => {
+      if (!content.trim() && !(images && images.length > 0)) return;
 
       let convId = convIdOverride ?? activeId;
       let wsId = convId
-        ? findWorkspaceForConversation(allConversationsRef.current, convId)
+        ? findWorkspaceForConversation(allConversationsRef.current, convId, convIndexRef)
         : null;
 
       if (!convId) {
@@ -776,6 +833,8 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
           createdAt: Date.now(), updatedAt: Date.now(),
           engine: defaultEngine,
         };
+        // Sync index immediately so `activeConversation` resolves on the next render.
+        convIndexRef.current.set(convId, wsId);
         setAllConversations((prev) => ({
           ...prev,
           [wsId!]: [conv, ...(prev[wsId!] ?? [])],
@@ -786,13 +845,14 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
       }
 
       if (!wsId) {
-        wsId = findWorkspaceForConversation(allConversationsRef.current, convId);
+        wsId = findWorkspaceForConversation(allConversationsRef.current, convId, convIndexRef);
       }
       if (!wsId) return;
 
       const userMsg: Message = {
         id: generateId(), role: "user", content,
         timestamp: Date.now(), status: "done",
+        images: images && images.length > 0 ? images : undefined,
       };
       const assistantMsg: Message = {
         id: generateId(), role: "assistant", content: "",
@@ -818,6 +878,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
 
       const currentConv = allConversationsRef.current[wsId]?.find((c) => c.id === convId);
       const engine = currentConv?.engine ?? defaultEngine;
+      const convModel = currentConv?.model || undefined;
       // Only --resume when a prior turn completed successfully on the backend.
       // Using user-message count alone breaks retries: after a failed first
       // attempt (spawn error / no CodeBuddy session) we'd pass --resume and get
@@ -835,6 +896,9 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
           conversationId: convId,
           engine,
           isContinue,
+          model: convModel,
+          // Omit when empty so the backend's Option<Vec> deserializes to None.
+          ...(images && images.length > 0 ? { images } : {}),
         });
       } catch (e) {
         setError(String(e));
@@ -851,7 +915,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
               msgs[msgs.length - 1] = { ...last, status: "error" };
             }
             return { ...conv, messages: msgs };
-          }),
+          }, convIndexRef),
         );
       }
     },
@@ -877,7 +941,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
           msgs[msgs.length - 1] = { ...last, status: "done", timestamp: Date.now() };
         }
         return { ...conv, messages: msgs };
-      }),
+      }, convIndexRef),
     );
   }, [activeId]);
 
@@ -906,11 +970,11 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
             };
           }
           return { ...conv, messages: msgs };
-        }),
-      );
-    },
-    [],
-  );
+        }, convIndexRef),
+    );
+  },
+  [],
+);
 
   const clearError = useCallback(() => { setError(null); }, []);
 
@@ -1010,6 +1074,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
     createConversation,
     switchConversation,
     renameConversation,
+    setConversationModel,
     deleteConversation,
     sendMessage,
     stopGeneration,

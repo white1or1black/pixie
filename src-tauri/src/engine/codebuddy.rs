@@ -1,4 +1,4 @@
-use super::{EngineStatus, NormalizedEvent, UsageInfo, shared};
+use super::{shared, EngineStatus, NormalizedEvent, UsageInfo};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -27,6 +27,81 @@ pub async fn get_codebuddy_version() -> Result<String> {
         anyhow::bail!("codebuddy --version returned non-zero exit status");
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Fetch available models from `codebuddy --help`.
+/// The `--model` option description lists supported models in parentheses.
+/// Note: `codebuddy --help` writes the model list to **stderr**, not stdout,
+/// so we capture both streams.
+pub async fn list_models() -> Vec<(String, String)> {
+    log::info!("[list_models] codebuddy: starting");
+    let binary = match find_codebuddy_binary() {
+        Ok(b) => b,
+        Err(e) => {
+            log::info!("[list_models] codebuddy: binary not found: {e}");
+            return vec![];
+        }
+    };
+    let env = collect_env().await;
+    let mut cmd = tokio::process::Command::new(&binary);
+    cmd.arg("--help");
+    for (k, v) in &env {
+        cmd.env(k, v);
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    shared::detach_from_controlling_terminal(&mut cmd);
+    log::info!("[list_models] codebuddy: spawning --help");
+    match tokio::time::timeout(std::time::Duration::from_secs(10), cmd.output()).await {
+        Ok(Ok(output)) => {
+            // codebuddy --help writes to both stdout and stderr; combine them.
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let combined = format!("{stdout}\n{stderr}");
+            let models = parse_model_list_from_help(&combined);
+            log::info!("[list_models] codebuddy: got {} models", models.len());
+            models
+        }
+        Ok(Err(e)) => {
+            log::warn!("[list_models] codebuddy: spawn error: {e}");
+            vec![]
+        }
+        Err(_) => {
+            log::warn!("[list_models] codebuddy: timed out after 10s");
+            vec![]
+        }
+    }
+}
+
+/// Parse model IDs from the `--model` help line.
+/// Format: `--model <model>  ... Currently supported: (id1, id2, id3)`
+fn parse_model_list_from_help(help: &str) -> Vec<(String, String)> {
+    for line in help.lines() {
+        let line = shared::strip_ansi_and_controls(line);
+        if line.contains("--model")
+            && (line.contains("Currently supported") || line.contains("supported:"))
+        {
+            if let Some(start) = line.rfind('(') {
+                if let Some(end) = line[start..].find(')') {
+                    let inner = &line[start + 1..start + end];
+                    let mut seen = std::collections::HashSet::<String>::new();
+                    return inner
+                        .split(',')
+                        .filter_map(|s| {
+                            let id = shared::strip_ansi_and_controls(s).trim().to_string();
+                            if id.is_empty() || !seen.insert(id.clone()) {
+                                None
+                            } else {
+                                Some((id.clone(), id))
+                            }
+                        })
+                        .collect();
+                }
+            }
+        }
+    }
+    vec![]
 }
 
 pub async fn check_available() -> EngineStatus {
@@ -93,13 +168,24 @@ fn base_stream_args() -> Vec<String> {
 /// session id to our conversation id; `--resume <id>` continues that session
 /// on later turns. This mirrors how the Claude engine is driven, so the shared
 /// session-id plumbing in `mod.rs` needs no special-casing for CodeBuddy.
-fn stream_args(session_id: &str, resume: bool, env: &HashMap<String, String>) -> Vec<String> {
+fn stream_args(
+    session_id: &str,
+    resume: bool,
+    env: &HashMap<String, String>,
+    model_override: Option<&str>,
+) -> Vec<String> {
     let mut args = base_stream_args();
     args.push(if resume { "--resume" } else { "--session-id" }.into());
     args.push(session_id.to_string());
-    if let Some(model) = env.get("CODEBUDDY_MODEL").filter(|s| !s.is_empty()) {
+    // Per-conversation model override takes precedence over CODEBUDDY_MODEL env var.
+    let model = model_override.filter(|s| !s.is_empty()).or_else(|| {
+        env.get("CODEBUDDY_MODEL")
+            .filter(|s| !s.is_empty())
+            .map(String::as_str)
+    });
+    if let Some(model) = model {
         args.push("--model".into());
-        args.push(model.clone());
+        args.push(model.to_string());
     }
     args
 }
@@ -135,14 +221,36 @@ async fn spawn(
     cmd.spawn().context("failed to spawn codebuddy process")
 }
 
-pub async fn spawn_single(session_id: &str, message: &str, cwd: Option<&str>) -> Result<Child> {
+pub async fn spawn_single(
+    session_id: &str,
+    message: &str,
+    cwd: Option<&str>,
+    model: Option<&str>,
+) -> Result<Child> {
     let env = collect_env().await;
-    spawn(stream_args(session_id, false, &env), message, cwd, &env).await
+    spawn(
+        stream_args(session_id, false, &env, model),
+        message,
+        cwd,
+        &env,
+    )
+    .await
 }
 
-pub async fn spawn_continue(session_id: &str, message: &str, cwd: Option<&str>) -> Result<Child> {
+pub async fn spawn_continue(
+    session_id: &str,
+    message: &str,
+    cwd: Option<&str>,
+    model: Option<&str>,
+) -> Result<Child> {
     let env = collect_env().await;
-    spawn(stream_args(session_id, true, &env), message, cwd, &env).await
+    spawn(
+        stream_args(session_id, true, &env, model),
+        message,
+        cwd,
+        &env,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -168,7 +276,11 @@ fn parse_top_level_error(val: &serde_json::Value) -> Vec<NormalizedEvent> {
                 .map(String::from)
                 .or_else(|| e.get("message").and_then(|m| m.as_str()).map(String::from))
         })
-        .or_else(|| val.get("message").and_then(|m| m.as_str()).map(String::from))
+        .or_else(|| {
+            val.get("message")
+                .and_then(|m| m.as_str())
+                .map(String::from)
+        })
         .unwrap_or_else(|| "CodeBuddy reported an unknown error".to_string());
     vec![NormalizedEvent::Error { message }]
 }
@@ -179,7 +291,11 @@ fn parse_error_result(val: &serde_json::Value) -> Vec<NormalizedEvent> {
     if val.get("type").and_then(|t| t.as_str()) != Some("result") {
         return vec![];
     }
-    if !val.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if !val
+        .get("is_error")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         return vec![];
     }
     let message = val
@@ -206,7 +322,9 @@ fn parse_result(val: &serde_json::Value) -> Vec<NormalizedEvent> {
     let mut out = Vec::new();
 
     if let Some(text) = val.get("result").and_then(|r| r.as_str()) {
-        out.push(NormalizedEvent::Final { text: text.to_string() });
+        out.push(NormalizedEvent::Final {
+            text: text.to_string(),
+        });
     }
 
     let usage = val.get("usage");
@@ -252,7 +370,11 @@ pub fn parse_line(line: &str) -> Vec<NormalizedEvent> {
         // CodeBuddy's terminal result: Final text + final Usage (parsed from the
         // CodeBuddy `usage` shape), or an Error when `is_error` is true.
         "result" => {
-            if val.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if val
+                .get("is_error")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 parse_error_result(&val)
             } else {
                 parse_result(&val)
@@ -274,7 +396,9 @@ mod tests {
 
     /// Helper: does `events` contain a streaming text delta with this text?
     fn has_text(events: &[NormalizedEvent], needle: &str) -> bool {
-        events.iter().any(|e| e.streaming_text().is_some_and(|t| t == needle))
+        events
+            .iter()
+            .any(|e| e.streaming_text().is_some_and(|t| t == needle))
     }
 
     /// `stream_event` wrapping a `content_block_delta` text_delta → a streaming
@@ -283,7 +407,10 @@ mod tests {
     fn parses_stream_event_text_delta() {
         let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Done"}},"session_id":"mt-1","parent_tool_use_id":null,"uuid":"x","__timestamp":"t","_requestId":"r"}"#;
         let events = parse_line(line);
-        assert!(has_text(&events, "Done"), "expected a 'Done' text delta, got {events:?}");
+        assert!(
+            has_text(&events, "Done"),
+            "expected a 'Done' text delta, got {events:?}"
+        );
     }
 
     /// A top-level `assistant` message with a tool_use block → a tool Start
@@ -300,12 +427,16 @@ mod tests {
         match &tool.kind {
             ToolEventKind::Start { name, input } => {
                 assert_eq!(name.as_deref(), Some("Bash"));
-                assert!(input.as_deref().is_some_and(|i| i.contains("mkdir -p /tmp/x")));
+                assert!(input
+                    .as_deref()
+                    .is_some_and(|i| i.contains("mkdir -p /tmp/x")));
             }
             other => panic!("expected Tool Start, got {other:?}"),
         }
         assert_eq!(tool.id, "call_1");
-        assert!(events.iter().any(|e| e.usage().is_some_and(|u| u.kind == "turn")));
+        assert!(events
+            .iter()
+            .any(|e| e.usage().is_some_and(|u| u.kind == "turn")));
     }
 
     /// A top-level `user` message with a tool_result block → a tool Result.
@@ -321,7 +452,9 @@ mod tests {
         match &tool.kind {
             ToolEventKind::Result { content, is_error } => {
                 assert!(!is_error);
-                assert!(content.as_deref().is_some_and(|c| c.contains("Exit Code: 0")));
+                assert!(content
+                    .as_deref()
+                    .is_some_and(|c| c.contains("Exit Code: 0")));
             }
             other => panic!("expected Tool Result, got {other:?}"),
         }
@@ -355,7 +488,9 @@ mod tests {
     fn parses_error_result() {
         let line = r#"{"type":"result","subtype":"error","is_error":true,"result":"","errors":["boom"],"uuid":"r","session_id":"mt-1"}"#;
         let events = parse_line(line);
-        assert!(events.iter().any(|e| matches!(e, NormalizedEvent::Error { message } if message == "boom")));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, NormalizedEvent::Error { message } if message == "boom")));
     }
 
     /// CodeBuddy top-level `error` with a string payload (not Claude's object shape).
@@ -379,14 +514,25 @@ mod tests {
         let line = r#"{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":100,"output_tokens":2,"cache_read_input_tokens":50,"cache_creation_input_tokens":10}},"session_id":"mt-1"}"#;
         let events = parse_line(line);
         // message_delta is not in ClaudeStreamEvent; usage is ignored for now (no crash).
-        assert!(events.is_empty() || events.iter().all(|e| e.usage().is_none() || e.usage().is_some_and(|u| u.input_tokens > 0)));
+        assert!(
+            events.is_empty()
+                || events
+                    .iter()
+                    .all(|e| e.usage().is_none() || e.usage().is_some_and(|u| u.input_tokens > 0))
+        );
     }
 
     /// Noise lines CodeBuddy emits between events must be ignored.
     #[test]
     fn ignores_noise_lines() {
-        assert!(parse_line(r#"{"type":"system","subtype":"status","status":null,"session_id":"mt-1"}"#).is_empty());
-        assert!(parse_line(r#"{"type":"file-history-snapshot","id":"f","timestamp":1,"isSnapshotUpdate":false}"#).is_empty());
+        assert!(parse_line(
+            r#"{"type":"system","subtype":"status","status":null,"session_id":"mt-1"}"#
+        )
+        .is_empty());
+        assert!(parse_line(
+            r#"{"type":"file-history-snapshot","id":"f","timestamp":1,"isSnapshotUpdate":false}"#
+        )
+        .is_empty());
         assert!(parse_line("").is_empty());
     }
 }

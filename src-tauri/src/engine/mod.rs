@@ -1,8 +1,8 @@
 pub mod claude;
 pub mod codebuddy;
 pub mod cursor;
-mod shared;
 pub mod persistent;
+mod shared;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -214,16 +214,28 @@ pub async fn check_all_engines() -> Vec<EngineStatus> {
     out
 }
 
+/// Fetch available models for a given engine.
+/// Returns a list of (model_id, display_label) pairs.
+pub async fn list_models(engine_id: &str) -> Vec<(String, String)> {
+    match engine_id {
+        "claude" => claude::list_models().await,
+        "codebuddy" => codebuddy::list_models().await,
+        "cursor" => cursor::list_models().await,
+        _ => vec![],
+    }
+}
+
 pub async fn spawn_single(
     engine_id: &str,
     session_id: &str,
     message: &str,
     cwd: Option<&str>,
+    model: Option<&str>,
 ) -> Result<Child> {
     match engine_id {
-        "claude" => claude::spawn_single(session_id, message, cwd).await,
-        "codebuddy" => codebuddy::spawn_single(session_id, message, cwd).await,
-        "cursor" => cursor::spawn_single(session_id, message, cwd).await,
+        "claude" => claude::spawn_single(session_id, message, cwd, model).await,
+        "codebuddy" => codebuddy::spawn_single(session_id, message, cwd, model).await,
+        "cursor" => cursor::spawn_single(session_id, message, cwd, model).await,
         other => anyhow::bail!("unknown engine: {other}"),
     }
 }
@@ -239,7 +251,7 @@ pub async fn spawn_headless(
     match engine_id {
         "claude" => claude::spawn_headless(session_id, message, cwd).await,
         // CodeBuddy/Cursor fall back to their regular spawn_single for now.
-        other => spawn_single(other, session_id, message, cwd).await,
+        other => spawn_single(other, session_id, message, cwd, None).await,
     }
 }
 
@@ -248,11 +260,12 @@ pub async fn spawn_continue(
     session_id: &str,
     message: &str,
     cwd: Option<&str>,
+    model: Option<&str>,
 ) -> Result<Child> {
     match engine_id {
-        "claude" => claude::spawn_continue(session_id, message, cwd).await,
-        "codebuddy" => codebuddy::spawn_continue(session_id, message, cwd).await,
-        "cursor" => cursor::spawn_continue(session_id, message, cwd).await,
+        "claude" => claude::spawn_continue(session_id, message, cwd, model).await,
+        "codebuddy" => codebuddy::spawn_continue(session_id, message, cwd, model).await,
+        "cursor" => cursor::spawn_continue(session_id, message, cwd, model).await,
         other => anyhow::bail!("unknown engine: {other}"),
     }
 }
@@ -276,11 +289,7 @@ impl AgentProcess {
     }
 
     #[allow(dead_code)]
-    pub async fn read_stream<F>(
-        &mut self,
-        engine_id: &str,
-        on_events: F,
-    ) -> Result<String>
+    pub async fn read_stream<F>(&mut self, engine_id: &str, on_events: F) -> Result<String>
     where
         F: FnMut(&[NormalizedEvent]),
     {
@@ -345,6 +354,8 @@ pub type SharedAgentProcess = Arc<Mutex<AgentProcess>>;
 pub struct ConversationEngineState {
     pub engine_id: String,
     pub external_session_id: Option<String>,
+    /// Per-conversation model override (empty = use engine's global config).
+    pub model: Option<String>,
 }
 
 pub type ConversationEngineMap = Arc<Mutex<HashMap<String, ConversationEngineState>>>;
@@ -378,12 +389,14 @@ pub async fn remember_session_id(
         return;
     }
     let mut guard = map.lock().await;
-    let entry = guard
-        .entry(conversation_id.to_string())
-        .or_insert_with(|| ConversationEngineState {
-            engine_id: engine_id.to_string(),
-            external_session_id: None,
-        });
+    let entry =
+        guard
+            .entry(conversation_id.to_string())
+            .or_insert_with(|| ConversationEngineState {
+                engine_id: engine_id.to_string(),
+                external_session_id: None,
+                model: None,
+            });
     entry.engine_id = engine_id.to_string();
     entry.external_session_id = Some(session_id.to_string());
 }
@@ -399,6 +412,7 @@ pub async fn bind_conversation_engine(
         .or_insert_with(|| ConversationEngineState {
             engine_id: engine_id.to_string(),
             external_session_id: None,
+            model: None,
         })
         .engine_id = engine_id.to_string();
 }
@@ -409,4 +423,15 @@ pub async fn conversation_engine_id(
 ) -> Option<String> {
     let guard = map.lock().await;
     guard.get(conversation_id).map(|s| s.engine_id.clone())
+}
+
+pub async fn set_conversation_model(
+    map: &ConversationEngineMap,
+    conversation_id: &str,
+    model: Option<String>,
+) {
+    let mut guard = map.lock().await;
+    if let Some(entry) = guard.get_mut(conversation_id) {
+        entry.model = model;
+    }
 }

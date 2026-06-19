@@ -3,6 +3,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import type { EngineStatus, AgentEngineId, EngineModelConfigs } from "../types";
 import { AGENT_ENGINES, ENGINE_MODEL_FIELDS } from "../types";
 import { useUpdater } from "../hooks/useUpdater";
+import { useDragRegion } from "../hooks/useDragRegion";
 
 // Brand mark — same art as the app/README icon.
 const iconUrl = new URL("../assets/icon.svg", import.meta.url).href;
@@ -43,6 +44,7 @@ export default function Settings({
   onPickDefaultWorkspace,
   onResetDefaultWorkspace,
 }: SettingsProps) {
+  const handleDragRegion = useDragRegion();
   const [_checking, setChecking] = useState(false);
   const [expandedEngines, setExpandedEngines] = useState<Record<AgentEngineId, boolean>>({
     claude: false,
@@ -64,8 +66,11 @@ export default function Settings({
 
   return (
     <div className="settings-enter flex flex-col flex-1 min-h-0 bg-[var(--bg-secondary)]">
-        {/* Header */}
-        <div className="shrink-0 flex items-center justify-between px-5 py-4 border-b border-[var(--border-color)]">
+        {/* Header — drag empty areas to move window */}
+        <div
+          onMouseDown={handleDragRegion}
+          className="shrink-0 flex items-center justify-between px-5 py-4 border-b border-[var(--border-color)]"
+        >
           <h2 className="text-base font-semibold text-[var(--text-primary)]">
             Settings
           </h2>
@@ -135,10 +140,10 @@ export default function Settings({
             </div>
           </section>
 
-          {/* Default engine for new sessions */}
+          {/* Preferred engine for new sessions */}
           <section>
             <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">
-              Default Engine
+              Preferred Engine
             </h3>
             <select
               value={defaultEngine}
@@ -156,10 +161,10 @@ export default function Settings({
             </p>
           </section>
 
-          {/* Default working directory */}
+          {/* Working directory */}
           <section>
             <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">
-              Default Working Directory
+              Working Directory
             </h3>
             <div className="bg-[var(--bg-primary)] rounded-xl p-4 border border-[var(--border-color)]">
               <p className="text-xs text-[var(--text-secondary)] break-all font-mono mb-3">
@@ -181,7 +186,7 @@ export default function Settings({
               </div>
             </div>
             <p className="text-xs text-[var(--text-secondary)] mt-2">
-              The folder Pixie uses by default. Applied on a fresh start with no
+              The folder Pixie uses when none is selected. Applied on a fresh start with no
               workspaces added — existing workspaces are not changed.
             </p>
           </section>

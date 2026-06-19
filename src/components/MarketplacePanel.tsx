@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { MarketplaceInfo, PluginCatalog, PluginInfo } from "../types";
+import { useDragRegion } from "../hooks/useDragRegion";
 
 interface MarketplacePanelProps {
   onClose: () => void;
@@ -27,6 +28,7 @@ function formatCount(n?: number): string {
 }
 
 export default function MarketplacePanel({ onClose, onSkillsChanged }: MarketplacePanelProps) {
+  const handleDragRegion = useDragRegion();
   const [marketplaces, setMarketplaces] = useState<MarketplaceInfo[]>([]);
   const [catalog, setCatalog] = useState<PluginCatalog>({ installed: [], available: [] });
   const [activeRepo, setActiveRepo] = useState<string>(SUGGESTED[0].repo);
@@ -192,8 +194,11 @@ export default function MarketplacePanel({ onClose, onSkillsChanged }: Marketpla
 
   return (
     <div className="settings-enter flex flex-col flex-1 min-h-0 bg-[var(--bg-primary)] overflow-hidden">
-        {/* Header */}
-        <div className="shrink-0 flex items-center justify-between px-4 py-3 border-b border-[var(--border-color)]">
+        {/* Header — drag empty areas to move window */}
+        <div
+          onMouseDown={handleDragRegion}
+          className="shrink-0 flex items-center justify-between px-4 py-3 border-b border-[var(--border-color)]"
+        >
           <h2 className="text-sm font-semibold text-[var(--text-primary)]">Skills Marketplace</h2>
           <button
             onClick={onClose}

@@ -1,27 +1,25 @@
 mod engine;
 mod pty;
 
+use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone, Utc};
+use engine::persistent::{
+    self as ps, read_persistent_turn, PersistentSession, SessionMap, IDLE_TIMEOUT, MAX_SESSIONS,
+};
 use engine::{
     bind_conversation_engine, check_all_engines, conversation_engine_id,
     init_conversation_engine_map, normalize_engine_id, read_child_stream, remember_session_id,
-    resolve_session_id, spawn_continue, spawn_headless, spawn_single, AgentProcess, ConversationEngineMap,
-    EngineStatus, NormalizedEvent, SharedAgentProcess,
+    resolve_session_id, set_conversation_model, spawn_continue, spawn_headless, spawn_single,
+    AgentProcess, ConversationEngineMap, EngineStatus, NormalizedEvent, SharedAgentProcess,
 };
-use engine::persistent::{
-    self as ps, PersistentSession, SessionMap,
-    IDLE_TIMEOUT, MAX_SESSIONS,
-    read_persistent_turn,
-};
-use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone, Utc};
 use pty::PtyMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 use tokio::sync::Mutex;
 
 // ---------------------------------------------------------------------------
@@ -325,7 +323,9 @@ fn emit_agent_events(
                     ("start", name.clone(), input.clone(), None, false)
                 }
                 engine::ToolEventKind::Result { content, is_error } => {
-                    let truncated = content.as_ref().map(|c| truncate_for_ui(c, MAX_TOOL_RESULT_CHARS));
+                    let truncated = content
+                        .as_ref()
+                        .map(|c| truncate_for_ui(c, MAX_TOOL_RESULT_CHARS));
                     ("result", None, None, truncated, *is_error)
                 }
             };
@@ -388,7 +388,12 @@ fn emit_agent_events(
             );
         }
 
-        if let NormalizedEvent::PermissionRequest { id, tool_name, input } = evt {
+        if let NormalizedEvent::PermissionRequest {
+            id,
+            tool_name,
+            input,
+        } = evt
+        {
             let _ = app.emit(
                 "agent-permission-request",
                 ResponsePermissionRequest {
@@ -407,11 +412,14 @@ fn emit_agent_events(
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri command: params + app/state boilerplate
 async fn send_message(
     message: String,
     conversation_id: String,
     engine: Option<String>,
     is_continue: Option<bool>,
+    model: Option<String>,
+    images: Option<Vec<String>>,
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
@@ -429,24 +437,26 @@ async fn send_message(
         }
     };
 
-    bind_conversation_engine(
-        &state.conversation_engines,
-        &conversation_id,
-        engine_id,
-    )
-    .await;
+    bind_conversation_engine(&state.conversation_engines, &conversation_id, engine_id).await;
+
+    // Store per-conversation model override on the backend.
+    set_conversation_model(&state.conversation_engines, &conversation_id, model.clone()).await;
 
     log::info!(
-        "[send_message] start: conv_id={}, engine={}, is_continue={}, msg_len={}",
+        "[send_message] start: conv_id={}, engine={}, is_continue={}, model={:?}, msg_len={}",
         conversation_id,
         engine_id,
         is_continue,
+        model,
         message.len()
     );
 
     let workspace = state.workspace.lock().await.clone();
     let session_id =
         resolve_session_id(&state.conversation_engines, &conversation_id, engine_id).await;
+    // Absolute paths of image attachments. Claude/CodeBuddy embed these as native
+    // image content blocks; Cursor (no stream-json stdin) gets them as @mentions.
+    let images_owned = images.unwrap_or_default();
 
     // --- Persistent session path (Claude / CodeBuddy) ---
     if engine_id == "claude" || engine_id == "codebuddy" {
@@ -459,23 +469,43 @@ async fn send_message(
         let message_owned = message.clone();
         let session_id_owned = session_id.clone();
         let workspace_owned = workspace.clone();
+        let model_owned = model.clone();
 
         tokio::spawn(async move {
             let mut sessions = sessions.lock().await;
 
-            // Try to reuse an existing live session.
+            // Try to reuse an existing live session. Kill and respawn if the
+            // per-conversation model override has changed since the session was
+            // created — the persistent session's model is baked in at spawn time.
             let needs_spawn = match sessions.get_mut(&conv_id) {
                 Some(session) => {
                     if session.is_alive() {
-                        log::info!("[send_message] reusing persistent session for {}", conv_id);
-                        // Write message to the existing session's stdin.
-                        if let Err(e) = session.send_message(&message_owned).await {
-                            log::warn!("[send_message] stdin write failed, will respawn: {}", e);
+                        let model_changed =
+                            model_owned.as_deref() != session.model_override.as_deref();
+                        if model_changed {
+                            log::info!(
+                                "[send_message] model changed ({:?} → {:?}), killing session for {}",
+                                session.model_override, model_owned, conv_id
+                            );
                             session.kill().await;
                             sessions.remove(&conv_id);
                             true
                         } else {
-                            false
+                            log::info!("[send_message] reusing persistent session for {}", conv_id);
+                            // Write message to the existing session's stdin.
+                            if let Err(e) =
+                                session.send_message(&message_owned, &images_owned).await
+                            {
+                                log::warn!(
+                                    "[send_message] stdin write failed, will respawn: {}",
+                                    e
+                                );
+                                session.kill().await;
+                                sessions.remove(&conv_id);
+                                true
+                            } else {
+                                false
+                            }
                         }
                     } else {
                         log::info!("[send_message] persistent session dead, will respawn");
@@ -491,19 +521,21 @@ async fn send_message(
                 let resume = is_continue;
                 log::info!(
                     "[send_message] spawning persistent session: engine={}, resume={}",
-                    engine_id_owned, resume
+                    engine_id_owned,
+                    resume
                 );
                 match PersistentSession::spawn(
                     &engine_id_owned,
                     &session_id_owned,
                     resume,
                     workspace_owned.as_deref(),
+                    model_owned.as_deref(),
                 )
                 .await
                 {
                     Ok(mut session) => {
                         // Send the first message via stdin.
-                        if let Err(e) = session.send_message(&message_owned).await {
+                        if let Err(e) = session.send_message(&message_owned, &images_owned).await {
                             log::error!("[send_message] failed to write first message: {}", e);
                             let _ = app_handle.emit(
                                 "agent-error",
@@ -515,7 +547,11 @@ async fn send_message(
                             return;
                         }
                         if let Some(pid) = session.pid() {
-                            log::info!("[send_message] persistent pid {} for conv {}", pid, conv_id);
+                            log::info!(
+                                "[send_message] persistent pid {} for conv {}",
+                                pid,
+                                conv_id
+                            );
                             kill_registry.lock().await.insert(conv_id.clone(), pid);
                         }
                         sessions.insert(conv_id.clone(), session);
@@ -535,10 +571,7 @@ async fn send_message(
             }
 
             // Get the stdout reader from the session.
-            let stdout = sessions
-                .get(&conv_id)
-                .map(|s| s.stdout())
-                .unwrap();
+            let stdout = sessions.get(&conv_id).map(|s| s.stdout()).unwrap();
 
             // We must release the sessions lock before reading, so the
             // read_persistent_turn can proceed without deadlock.
@@ -585,13 +618,19 @@ async fn send_message(
             }
 
             if stream_had_error {
-                log::info!("[send_message] persistent stream ended with error for conv {}", conv_id_after);
+                log::info!(
+                    "[send_message] persistent stream ended with error for conv {}",
+                    conv_id_after
+                );
                 return;
             }
 
             match result {
                 Ok(full_text) => {
-                    log::info!("[send_message] persistent done, total_len={}", full_text.len());
+                    log::info!(
+                        "[send_message] persistent done, total_len={}",
+                        full_text.len()
+                    );
                     let _ = app_handle.emit(
                         "agent-done",
                         ResponseDone {
@@ -632,7 +671,22 @@ async fn send_message(
     let app_handle = app.clone();
     let conv_id = conversation_id.clone();
     let engine_id_owned = engine_id.to_string();
-    let message_owned = message.clone();
+    // Cursor takes the message as a CLI arg, so it can't accept native image
+    // blocks — append image attachments as absolute @mention lines instead.
+    let mut message_owned = message.clone();
+    if !images_owned.is_empty() {
+        let mentions = images_owned
+            .iter()
+            .map(|p| format!("@{p}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        message_owned = if message_owned.trim().is_empty() {
+            mentions
+        } else {
+            format!("{}\n\n{}", message_owned.trim_end(), mentions)
+        };
+    }
+    let model_owned = model.clone();
 
     tokio::spawn(async move {
         let spawn_result = if is_continue {
@@ -641,6 +695,7 @@ async fn send_message(
                 &session_id,
                 &message_owned,
                 workspace.as_deref(),
+                model_owned.as_deref(),
             )
             .await
         } else {
@@ -649,6 +704,7 @@ async fn send_message(
                 &session_id,
                 &message_owned,
                 workspace.as_deref(),
+                model_owned.as_deref(),
             )
             .await
         };
@@ -703,7 +759,10 @@ async fn send_message(
         kill_registry.lock().await.remove(&conv_id_after);
 
         if stream_had_error {
-            log::info!("[send_message] stream ended with error event for conv {}", conv_id_after);
+            log::info!(
+                "[send_message] stream ended with error event for conv {}",
+                conv_id_after
+            );
             return;
         }
 
@@ -742,11 +801,14 @@ fn state_sessions_ref(app: &AppHandle) -> SessionMap {
 
 #[tauri::command]
 fn list_directory(path: String) -> Result<Vec<FileEntry>, String> {
-    let entries = std::fs::read_dir(&path).map_err(|e| format!("Failed to read directory: {}", e))?;
+    let entries =
+        std::fs::read_dir(&path).map_err(|e| format!("Failed to read directory: {}", e))?;
     let mut files: Vec<FileEntry> = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
-        let metadata = entry.metadata().map_err(|e| format!("Failed to read metadata: {}", e))?;
+        let metadata = entry
+            .metadata()
+            .map_err(|e| format!("Failed to read metadata: {}", e))?;
         files.push(FileEntry {
             name: entry.file_name().to_string_lossy().to_string(),
             path: entry.path().to_string_lossy().to_string(),
@@ -755,7 +817,9 @@ fn list_directory(path: String) -> Result<Vec<FileEntry>, String> {
         });
     }
     files.sort_by(|a, b| {
-        b.is_dir.cmp(&a.is_dir).then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     Ok(files)
 }
@@ -803,6 +867,93 @@ fn open_external(target: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Reveal a file/folder in the OS file manager (Finder / Explorer / etc).
+/// Requires the target to be within the current workspace when `workspace_path`
+/// is provided.
+#[tauri::command]
+fn reveal_in_file_manager(path: String, workspace_path: Option<String>) -> Result<(), String> {
+    use std::path::{Path, PathBuf};
+
+    let ws = workspace_path
+        .as_deref()
+        .ok_or_else(|| "workspace_path is required".to_string())?;
+    let ws_canon = std::fs::canonicalize(ws)
+        .map_err(|e| format!("Failed to canonicalize workspace '{}': {}", ws, e))?;
+
+    let raw = PathBuf::from(&path);
+    let abs: PathBuf = if raw.is_absolute() {
+        raw
+    } else {
+        Path::new(ws).join(raw)
+    };
+
+    let meta = std::fs::metadata(&abs);
+    let (target, is_dir) = match meta {
+        Ok(m) => (abs.clone(), m.is_dir()),
+        Err(_) => {
+            // Deleted / missing file: best effort, open its parent directory.
+            let parent = abs
+                .parent()
+                .ok_or_else(|| format!("Path has no parent: {}", abs.to_string_lossy()))?;
+            (parent.to_path_buf(), true)
+        }
+    };
+
+    // Canonicalize the best-available existing path for safety checks.
+    let check_path = std::fs::canonicalize(&target)
+        .map_err(|e| format!("Failed to canonicalize '{}': {}", target.to_string_lossy(), e))?;
+    if !check_path.starts_with(&ws_canon) {
+        return Err(format!(
+            "Refusing to reveal path outside workspace: {}",
+            check_path.to_string_lossy()
+        ));
+    }
+
+    if cfg!(target_os = "macos") {
+        if is_dir {
+            std::process::Command::new("open")
+                .arg(&target)
+                .spawn()
+                .map_err(|e| format!("Failed to open '{}': {}", target.to_string_lossy(), e))?;
+        } else {
+            std::process::Command::new("open")
+                .args(["-R"])
+                .arg(&target)
+                .spawn()
+                .map_err(|e| format!("Failed to reveal '{}': {}", target.to_string_lossy(), e))?;
+        }
+        return Ok(());
+    }
+
+    if cfg!(target_os = "windows") {
+        let arg = if is_dir {
+            target.to_string_lossy().to_string()
+        } else {
+            format!("/select,{}", target.to_string_lossy())
+        };
+        std::process::Command::new("explorer.exe")
+            .arg(arg)
+            .spawn()
+            .map_err(|e| format!("Failed to open Explorer: {}", e))?;
+        return Ok(());
+    }
+
+    // Linux: open directory (best effort).
+    let to_open = if is_dir {
+        target
+    } else {
+        target
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or(target)
+    };
+    std::process::Command::new("xdg-open")
+        .arg(&to_open)
+        .spawn()
+        .map_err(|e| format!("Failed to open '{}': {}", to_open.to_string_lossy(), e))?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn pty_spawn(
     id: String,
@@ -842,10 +993,7 @@ async fn pty_resize(
 }
 
 #[tauri::command]
-async fn pty_kill(
-    id: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
+async fn pty_kill(id: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
     pty::kill_pty(&state.pty_map, &id);
     Ok(())
 }
@@ -864,7 +1012,13 @@ async fn git_status(path: String) -> Result<String, String> {
 async fn git_log(path: String, count: Option<usize>) -> Result<String, String> {
     let n = count.unwrap_or(20);
     let output = std::process::Command::new("git")
-        .args(["log", "--oneline", "--graph", "--decorate", format!("-{n}").as_str()])
+        .args([
+            "log",
+            "--oneline",
+            "--graph",
+            "--decorate",
+            format!("-{n}").as_str(),
+        ])
         .current_dir(&path)
         .output()
         .map_err(|e| format!("Failed to run git: {}", e))?;
@@ -872,10 +1026,25 @@ async fn git_log(path: String, count: Option<usize>) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn git_diff(path: String, commit: Option<String>, staged: Option<bool>) -> Result<String, String> {
-    let mut args = vec!["diff"];
-    if staged.unwrap_or(false) { args.push("--staged"); }
-    if let Some(ref c) = commit { args.push(c); }
+async fn git_diff(
+    path: String,
+    commit: Option<String>,
+    staged: Option<bool>,
+    context: Option<usize>,
+) -> Result<String, String> {
+    // --find-renames so rename detection runs for unstaged/commit diffs too,
+    // surfacing `rename from`/`rename to` headers the viewer badges on.
+    let mut args: Vec<String> = vec!["diff".into(), "--find-renames".into()];
+    if staged.unwrap_or(false) {
+        args.push("--staged".into());
+    }
+    // Unify context: Some(n) → `-U{n>` (0 hides unchanged context), None → git's default of 3.
+    if let Some(n) = context {
+        args.push(format!("-U{n}"));
+    }
+    if let Some(ref c) = commit {
+        args.push(c.clone());
+    }
     let output = std::process::Command::new("git")
         .args(&args)
         .current_dir(&path)
@@ -886,8 +1055,8 @@ async fn git_diff(path: String, commit: Option<String>, staged: Option<bool>) ->
 
 #[tauri::command]
 fn read_file_content(path: String) -> Result<String, String> {
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read file: {}", e))?;
+    let content =
+        std::fs::read_to_string(&path).map_err(|e| format!("Failed to read file: {}", e))?;
     if content.len() > 500_000 {
         Ok(content[..500_000].to_string() + "\n\n... (truncated)")
     } else {
@@ -998,14 +1167,13 @@ fn skill_entry_from_file(skill_md: &std::path::Path, source: &str) -> Option<Ski
     let text = String::from_utf8_lossy(&bytes);
     let (fm_name, fm_desc, body) = parse_frontmatter(&text);
 
-    let name = fm_name
-        .or_else(|| {
-            skill_md
-                .parent()
-                .and_then(|p| p.file_stem())
-                .and_then(|s| s.to_str())
-                .map(String::from)
-        })?;
+    let name = fm_name.or_else(|| {
+        skill_md
+            .parent()
+            .and_then(|p| p.file_stem())
+            .and_then(|s| s.to_str())
+            .map(String::from)
+    })?;
     let name = name.trim().to_string();
     if name.is_empty() {
         return None;
@@ -1144,7 +1312,9 @@ async fn plugin_marketplace_add(source: String, scope: Option<String>) -> Result
         args.push("--scope".into());
         args.push(s);
     }
-    engine::claude::run_claude_command(args).await.map_err(|e| e.to_string())
+    engine::claude::run_claude_command(args)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Remove a configured marketplace by name.
@@ -1189,8 +1359,7 @@ async fn get_default_workspace_path(app: AppHandle) -> Result<String, String> {
         .or_else(|_| std::env::var("USERPROFILE"))
         .map_err(|_| "cannot determine home directory".to_string())?;
     let dir = std::path::Path::new(&home).join(".pixie");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("failed to create ~/.pixie: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create ~/.pixie: {e}"))?;
     Ok(dir.to_string_lossy().to_string())
 }
 
@@ -1199,10 +1368,7 @@ async fn get_default_workspace_path(app: AppHandle) -> Result<String, String> {
 /// chosen folder is created if needed so it is usable as an agent CWD. This is
 /// config-only: it does not move or modify existing workspaces.
 #[tauri::command]
-async fn set_default_workspace_path(
-    path: Option<String>,
-    app: AppHandle,
-) -> Result<(), String> {
+async fn set_default_workspace_path(path: Option<String>, app: AppHandle) -> Result<(), String> {
     match path {
         Some(raw) => {
             let trimmed = raw.trim().to_string();
@@ -1226,7 +1392,11 @@ async fn set_default_workspace_path(
 #[tauri::command]
 async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
-    Ok(app.dialog().file().blocking_pick_folder().map(|d| d.to_string()))
+    Ok(app
+        .dialog()
+        .file()
+        .blocking_pick_folder()
+        .map(|d| d.to_string()))
 }
 
 #[tauri::command]
@@ -1248,10 +1418,60 @@ async fn set_engine_model_config(
     Ok(())
 }
 
+/// Called by the frontend when the user changes the per-conversation model
+/// override in the InputBar dropdown. Updates the backend model state and
+/// kills any existing persistent session so the next `send_message` will
+/// respawn it with the new model.
 #[tauri::command]
-async fn set_model_config(
-    config: HashMap<String, String>,
+async fn update_conversation_model(
+    conversation_id: String,
+    model: Option<String>,
+    engine: Option<String>,
+    state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    let engine_id = match engine.as_deref() {
+        Some(e) => engine::normalize_engine_id(e).map_err(|e| e.to_string())?,
+        None => &conversation_engine_id(&state.conversation_engines, &conversation_id)
+            .await
+            .unwrap_or_else(|| "claude".to_string()),
+    };
+
+    // Update the engine binding first (ensures entry exists).
+    bind_conversation_engine(&state.conversation_engines, &conversation_id, engine_id).await;
+
+    // Store the model override.
+    engine::set_conversation_model(&state.conversation_engines, &conversation_id, model.clone())
+        .await;
+
+    log::info!(
+        "[set_conversation_model] conv_id={}, engine={}, model={:?}",
+        conversation_id,
+        engine_id,
+        model
+    );
+
+    // Kill any existing persistent session so the next send_message will
+    // respawn with the new model. Only Claude/CodeBuddy use persistent
+    // sessions; Cursor spawns per-message so no cleanup needed.
+    if engine_id == "claude" || engine_id == "codebuddy" {
+        let mut sessions = state.sessions.lock().await;
+        if let Some(session) = sessions.get_mut(&conversation_id) {
+            log::info!(
+                "[set_conversation_model] killing persistent session for conv {} (model changed)",
+                conversation_id
+            );
+            session.kill().await;
+            sessions.remove(&conversation_id);
+        }
+        // Also remove from kill registry (the old PID is stale).
+        state.kill_registry.lock().await.remove(&conversation_id);
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_model_config(config: HashMap<String, String>) -> Result<(), String> {
     engine::set_model_config_overrides(config);
     Ok(())
 }
@@ -1265,7 +1485,10 @@ async fn stop_generation(
     {
         let mut sessions = state.sessions.lock().await;
         if let Some(session) = sessions.get_mut(&conversation_id) {
-            log::info!("[stop_generation] killing persistent session for conv {}", conversation_id);
+            log::info!(
+                "[stop_generation] killing persistent session for conv {}",
+                conversation_id
+            );
             // Kill the persistent process. The next message will respawn via --resume.
             session.kill().await;
             sessions.remove(&conversation_id);
@@ -1280,7 +1503,11 @@ async fn stop_generation(
     };
 
     if let Some(pid) = pid {
-        log::info!("[stop_generation] killing claude pid {} for conv {}", pid, conversation_id);
+        log::info!(
+            "[stop_generation] killing claude pid {} for conv {}",
+            pid,
+            conversation_id
+        );
         // Send SIGTERM to the claude process; its stdout closes, read_stream returns,
         // and the streaming task emits claude-done with whatever was streamed so far.
         let _ = tokio::process::Command::new("kill")
@@ -1365,6 +1592,44 @@ async fn pick_files(app: AppHandle) -> Result<Option<Vec<String>>, String> {
     Ok(files.map(|vec| vec.into_iter().map(|f| f.to_string()).collect()))
 }
 
+/// Persist a pasted screenshot/image to disk and return its absolute path.
+///
+/// The webview can only hand us clipboard image data as bytes over IPC; to keep
+/// that compact the frontend base64-encodes the Blob. We decode here, write it
+/// under `<data_dir>/pasted-images/`, and hand the path back so the composer can
+/// stage it as an attachment (→ `@mention`) exactly like a dragged-in file.
+/// The path lives outside the workspace, so it is sent as an absolute `@mention`
+/// (engines run with permissions bypassed, so reading it is allowed).
+#[tauri::command]
+async fn save_pasted_image(app: AppHandle, data: String, ext: String) -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let bytes = STANDARD
+        .decode(data.as_bytes())
+        .map_err(|e| format!("Invalid base64 image data: {e}"))?;
+    if bytes.is_empty() {
+        return Err("Empty image data".to_string());
+    }
+    let dir = get_data_dir(&app)?.join("pasted-images");
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create pasted-images dir: {e}"))?;
+    // Monotonic-enough filename: no Math.random on the JS side either, and this
+    // single millisecond is unique enough for human paste cadence.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("System clock error: {e}"))?
+        .as_millis();
+    let safe_ext = {
+        let e = ext.trim().trim_start_matches('.').to_lowercase();
+        if e.is_empty() {
+            "png".to_string()
+        } else {
+            e
+        }
+    };
+    let path = dir.join(format!("pasted-{now}.{safe_ext}"));
+    fs::write(&path, &bytes).map_err(|e| format!("Failed to write pasted image: {e}"))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
 #[tauri::command]
 async fn get_workspace(
     app: AppHandle,
@@ -1412,7 +1677,8 @@ async fn load_app_config(app: AppHandle) -> Result<Option<AppConfig>, String> {
     if !file.exists() {
         return Ok(None);
     }
-    let content = fs::read_to_string(&file).map_err(|e| format!("Failed to read config.json: {e}"))?;
+    let content =
+        fs::read_to_string(&file).map_err(|e| format!("Failed to read config.json: {e}"))?;
     // Tolerate a corrupted/partial file by falling back to defaults rather than
     // bricking the app on a bad read.
     let config: AppConfig = serde_json::from_str(&content).unwrap_or_default();
@@ -1424,7 +1690,8 @@ async fn load_app_config(app: AppHandle) -> Result<Option<AppConfig>, String> {
 async fn save_app_config(config: AppConfig, app: AppHandle) -> Result<(), String> {
     let data_dir = get_data_dir(&app)?;
     fs::create_dir_all(&data_dir).map_err(|e| format!("Failed to create data directory: {e}"))?;
-    let json = serde_json::to_string_pretty(&config).map_err(|e| format!("Failed to serialize config: {e}"))?;
+    let json = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("Failed to serialize config: {e}"))?;
     atomic_write(&data_dir.join("config.json"), &json)
 }
 
@@ -1436,7 +1703,8 @@ async fn load_history(app: AppHandle) -> Result<Vec<HistoryEntry>, String> {
     if !file.exists() {
         return Ok(vec![]);
     }
-    let content = fs::read_to_string(&file).map_err(|e| format!("Failed to read history.jsonl: {e}"))?;
+    let content =
+        fs::read_to_string(&file).map_err(|e| format!("Failed to read history.jsonl: {e}"))?;
     let mut entries = Vec::new();
     for line in content.lines() {
         let line = line.trim();
@@ -1458,7 +1726,8 @@ async fn save_history(entries: Vec<HistoryEntry>, app: AppHandle) -> Result<(), 
     fs::create_dir_all(&data_dir).map_err(|e| format!("Failed to create data directory: {e}"))?;
     let mut out = String::new();
     for entry in &entries {
-        let line = serde_json::to_string(entry).map_err(|e| format!("Failed to serialize history entry: {e}"))?;
+        let line = serde_json::to_string(entry)
+            .map_err(|e| format!("Failed to serialize history entry: {e}"))?;
         out.push_str(&line);
         out.push('\n');
     }
@@ -1479,6 +1748,20 @@ async fn check_engine_available(engine: String) -> Result<EngineStatusResponse, 
     Ok(engine::check_engine(&engine).await.into())
 }
 
+#[tauri::command]
+async fn list_models(engine: String) -> Result<Vec<serde_json::Value>, String> {
+    log::info!("[list_models] called for engine={engine}");
+    let models = engine::list_models(&engine).await;
+    log::info!(
+        "[list_models] engine={engine} returned {} models",
+        models.len()
+    );
+    Ok(models
+        .into_iter()
+        .map(|(id, label)| serde_json::json!({ "id": id, "label": label }))
+        .collect())
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -1494,7 +1777,9 @@ fn get_data_dir(_app: &AppHandle) -> Result<PathBuf, String> {
 /// within one volume (the data dir always is), so a crash mid-write leaves the
 /// previous file intact instead of a truncated/corrupt one.
 fn atomic_write(path: &std::path::Path, content: &str) -> Result<(), String> {
-    let dir = path.parent().ok_or_else(|| "target path has no parent".to_string())?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| "target path has no parent".to_string())?;
     let file_name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -1623,7 +1908,7 @@ fn compute_next_run(spec: &ScheduleSpec, now_utc: DateTime<Utc>) -> Option<Strin
         }
         ScheduleSpec::WeekdaysTime { hour, minute } => {
             // Monday=1 .. Friday=5 in num_days_from_monday.
-            next_local_occurrence(now_local, *hour, *minute, |wd| wd >= 1 && wd <= 5)?
+            next_local_occurrence(now_local, *hour, *minute, |wd| (1..=5).contains(&wd))?
         }
         ScheduleSpec::EveryNMinutes { minutes } => {
             now_local + chrono::Duration::minutes((*minutes).max(1) as i64)
@@ -2113,7 +2398,10 @@ pub fn run() {
                             while sessions.len() > MAX_SESSIONS {
                                 if let Some((oldest_id, _)) = entries.first() {
                                     if let Some(mut s) = sessions.remove(oldest_id) {
-                                        log::info!("[cleanup] evicting LRU session for {}", oldest_id);
+                                        log::info!(
+                                            "[cleanup] evicting LRU session for {}",
+                                            oldest_id
+                                        );
                                         s.kill().await;
                                     }
                                 }
@@ -2194,6 +2482,7 @@ pub fn run() {
             list_directory,
             read_file_content,
             open_external,
+            reveal_in_file_manager,
             list_skills,
             plugin_marketplace_list,
             plugin_available,
@@ -2216,6 +2505,7 @@ pub fn run() {
             pick_folder,
             select_workspace,
             pick_files,
+            save_pasted_image,
             get_workspace,
             set_active_workspace,
             load_app_config,
@@ -2224,6 +2514,8 @@ pub fn run() {
             save_history,
             check_engines_available,
             check_engine_available,
+            list_models,
+            update_conversation_model,
             list_scheduled_tasks,
             create_scheduled_task,
             update_scheduled_task,
@@ -2265,10 +2557,18 @@ mod tests {
         // (just asserts invariants on whatever was found); reports the count.
         let skills = list_skills(None).unwrap_or_default();
         let plugin_count = skills.iter().filter(|s| s.source == "plugin").count();
-        eprintln!("list_skills(None) -> {} skills ({} plugin)", skills.len(), plugin_count);
+        eprintln!(
+            "list_skills(None) -> {} skills ({} plugin)",
+            skills.len(),
+            plugin_count
+        );
         for s in &skills {
             assert!(!s.name.is_empty(), "empty name: {:?}", s);
-            assert!(s.invocation.starts_with('/') && s.invocation.ends_with(' '), "bad invocation: {:?}", s);
+            assert!(
+                s.invocation.starts_with('/') && s.invocation.ends_with(' '),
+                "bad invocation: {:?}",
+                s
+            );
         }
     }
 }

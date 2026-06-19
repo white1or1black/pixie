@@ -1,15 +1,21 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, lazy, Suspense } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useDragRegion } from "./hooks/useDragRegion";
 import Sidebar from "./components/Sidebar";
-import ChatView from "./components/ChatView";
 import InputBar from "./components/InputBar";
-import Settings from "./components/Settings";
-import MarketplacePanel from "./components/MarketplacePanel";
-import ScheduledTasksPanel from "./components/ScheduledTasksPanel";
-import FileExplorer from "./components/RightPanel";
 import { openExternal } from "./openExternal";
 import { useChat } from "./hooks/useChat";
+import EngineBadge from "./components/EngineBadge";
+
+// Lazy-load heavy panels that aren't needed on initial render or during
+// workspace/conversation switches.  React renders the fallback (loading
+// indicator) immediately, giving the user a responsive feel while the chunk
+// loads or the component re-mounts after a workspace switch.
+const ChatView = lazy(() => import("./components/ChatView"));
+const Settings = lazy(() => import("./components/Settings"));
+const MarketplacePanel = lazy(() => import("./components/MarketplacePanel"));
+const ScheduledTasksPanel = lazy(() => import("./components/ScheduledTasksPanel"));
+const FileExplorer = lazy(() => import("./components/RightPanel"));
 import { useScheduledTasks } from "./hooks/useScheduledTasks";
 import type {
   EngineModelConfigs,
@@ -19,11 +25,19 @@ import type {
   TaskRunRecord,
   EngineStatus,
 } from "./types";
-import { AGENT_ENGINES } from "./types";
 import { bootstrap, getConfig, updateConfig } from "./lib/storage";
 
 // Brand mark — same art as the app/README icon.
 const iconUrl = new URL("./assets/icon.svg", import.meta.url).href;
+
+/** Lightweight loading indicator shown while lazy-loaded panels mount. */
+function LoadingPanel() {
+  return (
+    <div className="flex items-center justify-center flex-1 h-full">
+      <div className="w-5 h-5 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" />
+    </div>
+  );
+}
 
 function SplashScreen() {
   return (
@@ -126,6 +140,7 @@ function AppShell() {
     createConversation,
     switchConversation,
     renameConversation,
+    setConversationModel,
     deleteConversation,
     sendMessage,
     stopGeneration,
@@ -245,6 +260,10 @@ function AppShell() {
     [],
   );
 
+  const handleModelChange = useCallback((model: string | undefined) => {
+    if (activeConversation) setConversationModel(activeConversation.id, model);
+  }, [activeConversation, setConversationModel]);
+
   const handlePickDefaultWorkspace = useCallback(async () => {
     try {
       const path = await invoke<string | null>("pick_folder");
@@ -292,13 +311,14 @@ function AppShell() {
           setMainView("chat");
           switchConversation(id, workspaceId);
         }}
-        onNew={(workspaceId) => {
+        onNew={(opts) => {
           setMainView("chat");
-          createConversation(workspaceId, defaultEngine);
+          createConversation(opts?.workspaceId, opts?.engine ?? defaultEngine, opts?.model);
         }}
         defaultEngine={defaultEngine}
         onDefaultEngineChange={setDefaultEngine}
         engineStatuses={engineStatuses}
+        engineModelConfigs={engineModelConfigs}
         onDelete={deleteConversation}
         onRename={renameConversation}
         onAddWorkspace={addWorkspace}
@@ -316,10 +336,10 @@ function AppShell() {
           <>
             {/* Header — drag empty areas to move window */}
             <header
-              className={`shrink-0 flex items-center justify-between px-4 py-3 border-b border-[var(--border-color)] bg-[var(--bg-primary)] ${navigator.platform?.includes("Mac") && !sidebarOpen ? "pl-20" : ""}`}
+              className={`relative shrink-0 flex items-center px-4 py-3 border-b border-[var(--border-color)] bg-[var(--bg-primary)] ${navigator.platform?.includes("Mac") && !sidebarOpen ? "pl-20" : ""}`}
               onMouseDown={handleDragRegion}
             >
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-3 flex-1 min-w-0">
                 {!sidebarOpen && (
                   <button
                     onClick={() => {
@@ -344,7 +364,7 @@ function AppShell() {
                     <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
                   </svg>
                 </button>
-                <div className="min-w-0">
+                <div className="min-w-0 flex-1">
                   {headerEditing ? (
                     <input
                       ref={headerEditRef}
@@ -372,42 +392,37 @@ function AppShell() {
                       {activeConversation?.title ?? "Pixie"}
                     </h1>
                   )}
-                  {(activeConversation ||
-                    (activeWorkspace && activeWorkspace.path !== defaultWorkspacePath)) && (
-                    <p className="text-[10px] text-[var(--text-secondary)] truncate" title={activeWorkspace?.path}>
-                      {activeWorkspace && activeWorkspace.path !== defaultWorkspacePath && (
+                  {(activeWorkspace || activeConversation) && (
+                    <p className="text-[10px] text-[var(--text-secondary)] truncate" title={activeWorkspace?.path ?? undefined}>
+                      {activeWorkspace && defaultWorkspacePath && activeWorkspace.path !== defaultWorkspacePath && (
                         <>
                           📁 {activeWorkspace.name}
                           {activeConversation && <span className="mx-1">·</span>}
                         </>
                       )}
                       {activeConversation && (
-                        <span className="text-[var(--accent)]/80">
-                          {AGENT_ENGINES.find((e) => e.id === activeConversation.engine)?.label ?? activeConversation.engine}
-                        </span>
+                        <EngineBadge engine={activeConversation.engine} />
                       )}
                     </p>
                   )}
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => setFileExplorerOpen((prev) => !prev)}
-                  disabled={!activeWorkspace}
-                  className={`p-1.5 rounded-lg transition-colors ${
-                    fileExplorerOpen
-                      ? "bg-[var(--bg-tertiary)] text-[var(--accent)]"
-                      : "hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
-                  } disabled:opacity-30 disabled:cursor-not-allowed`}
-                  title={activeWorkspace ? "Toggle preview panel" : "Add a workspace first"}
-                >
-                  {/* Right side-panel toggle */}
-                  <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-                    <rect x="3" y="4" width="14" height="12" rx="2" stroke="currentColor" strokeWidth="1.5" />
-                    <line x1="13" y1="4" x2="13" y2="16" stroke="currentColor" strokeWidth="1.5" />
-                  </svg>
-                </button>
-              </div>
+              <button
+                onClick={() => setFileExplorerOpen((prev) => !prev)}
+                disabled={!activeWorkspace}
+                className={`shrink-0 ml-2 p-1.5 rounded-lg bg-[var(--bg-primary)] transition-colors ${
+                  fileExplorerOpen
+                    ? "text-[var(--accent)] hover:bg-[var(--bg-tertiary)]"
+                    : "text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]"
+                } disabled:opacity-30 disabled:cursor-not-allowed`}
+                title={activeWorkspace ? "Toggle preview panel" : "Add a workspace first"}
+              >
+                {/* Right side-panel toggle */}
+                <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                  <rect x="3" y="4" width="14" height="12" rx="2" stroke="currentColor" strokeWidth="1.5" />
+                  <line x1="13" y1="4" x2="13" y2="16" stroke="currentColor" strokeWidth="1.5" />
+                </svg>
+              </button>
             </header>
 
             {error && (
@@ -417,10 +432,12 @@ function AppShell() {
               </div>
             )}
 
-            <ChatView conversation={activeConversation} isGenerating={isGenerating} onOpenPreview={handleOpenPreview} onRespondPermission={respondPermission} />
+            <Suspense fallback={<LoadingPanel />}>
+              <ChatView conversation={activeConversation} isGenerating={isGenerating} onOpenPreview={handleOpenPreview} onRespondPermission={respondPermission} />
+            </Suspense>
 
             <InputBar
-              onSend={sendMessage}
+              onSend={(msg, images) => sendMessage(msg, undefined, images)}
               onStop={() => stopGeneration()}
               isGenerating={isGenerating}
               disabled={!activeWorkspace}
@@ -430,11 +447,16 @@ function AppShell() {
               textareaRef={composerRef}
               skills={skills}
               workspacePath={activeWorkspace?.path ?? null}
+              engine={activeConversation?.engine}
+              model={activeConversation?.model}
+              onModelChange={handleModelChange}
+              engineModelConfigs={engineModelConfigs}
             />
           </>
         )}
 
         {mainView === "tasks" && (
+          <Suspense fallback={<LoadingPanel />}>
           <ScheduledTasksPanel
             workspaces={workspaces}
             tasks={scheduledTasks}
@@ -462,16 +484,20 @@ function AppShell() {
             }}
             onClose={() => setMainView("chat")}
           />
+          </Suspense>
         )}
 
         {mainView === "skills" && (
+          <Suspense fallback={<LoadingPanel />}>
           <MarketplacePanel
             onClose={() => setMainView("chat")}
             onSkillsChanged={reloadSkills}
           />
+          </Suspense>
         )}
 
         {mainView === "settings" && (
+          <Suspense fallback={<LoadingPanel />}>
           <Settings
             engineStatuses={engineStatuses}
             onRefreshStatus={refreshEngineStatuses}
@@ -488,6 +514,7 @@ function AppShell() {
             onPickDefaultWorkspace={handlePickDefaultWorkspace}
             onResetDefaultWorkspace={handleResetDefaultWorkspace}
           />
+          </Suspense>
         )}
       </div>
 
@@ -497,10 +524,12 @@ function AppShell() {
           inside it also persist across workspace switches. */}
       {activeWorkspace?.path && (
         <div className="h-full" style={{ display: fileExplorerOpen ? "block" : "none" }}>
+          <Suspense fallback={<LoadingPanel />}>
           <FileExplorer
             workspacePath={activeWorkspace.path}
             previewTarget={previewTarget}
           />
+          </Suspense>
         </div>
       )}
     </div>

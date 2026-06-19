@@ -1,8 +1,9 @@
-import { useState, useMemo, useEffect, useRef } from "react";
+import { useState, useMemo, useEffect, useRef, memo } from "react";
 import type { ConversationEntry } from "../hooks/useChat";
-import type { WorkspaceState, AgentEngineId, EngineStatus } from "../types";
+import type { WorkspaceState, AgentEngineId, EngineStatus, EngineModelConfigs } from "../types";
 import { useDragRegion } from "../hooks/useDragRegion";
-import { AGENT_ENGINES } from "../types";
+import NewAgentModal from "./NewAgentModal";
+import EngineBadge from "./EngineBadge";
 
 interface SidebarProps {
   entries: ConversationEntry[];
@@ -11,7 +12,7 @@ interface SidebarProps {
   activeId: string | null;
   generatingIds: Set<string>;
   onSelect: (id: string, workspaceId: string) => void;
-  onNew: (workspaceId?: string) => void;
+  onNew: (opts?: { workspaceId?: string; engine?: AgentEngineId; model?: string }) => void;
   onDelete: (id: string, workspaceId: string) => void;
   onRename: (id: string, newTitle: string) => void;
   onAddWorkspace: () => void;
@@ -25,6 +26,7 @@ interface SidebarProps {
   defaultEngine: AgentEngineId;
   onDefaultEngineChange: (engine: AgentEngineId) => void;
   engineStatuses: EngineStatus[];
+  engineModelConfigs: EngineModelConfigs;
   defaultWorkspacePath: string;
 }
 
@@ -61,7 +63,7 @@ function sortEntries(entries: ConversationEntry[], generatingIds: Set<string>): 
   });
 }
 
-function ConversationRow({
+const ConversationRow = memo(function ConversationRow({
   entry,
   workspaceLabel,
   isActive,
@@ -71,7 +73,7 @@ function ConversationRow({
   onRename,
 }: {
   entry: ConversationEntry;
-  workspaceLabel: string;
+  workspaceLabel?: string;
   isActive: boolean;
   isGenerating: boolean;
   onSelect: () => void;
@@ -139,12 +141,16 @@ function ConversationRow({
             </p>
           )}
         </div>
-          <p className="text-[10px] mt-0.5 opacity-60 truncate">
-          <span className="text-[var(--accent)]/80">{workspaceLabel}</span>
-          <span className="mx-1">·</span>
-          <span>{AGENT_ENGINES.find((e) => e.id === conv.engine)?.label ?? conv.engine}</span>
-          <span className="mx-1">·</span>
-          {relativeTime(conv.updatedAt)}
+        <p className="text-[10px] mt-0.5 opacity-60 truncate flex items-center gap-1.5">
+          {workspaceLabel ? (
+            <>
+              <span className="text-[var(--accent)]/80 truncate">{workspaceLabel}</span>
+              <span className="opacity-60">·</span>
+            </>
+          ) : null}
+          <EngineBadge engine={conv.engine} />
+          <span className="opacity-60">·</span>
+          <span>{relativeTime(conv.updatedAt)}</span>
         </p>
       </div>
       <button
@@ -170,7 +176,7 @@ function ConversationRow({
       </button>
     </div>
   );
-}
+});
 
 function SectionHeader({
   label,
@@ -215,6 +221,7 @@ function SectionHeader({
 function EntryList({
   entries,
   workspaces,
+  defaultWorkspacePath,
   activeId,
   generatingIds,
   onSelect,
@@ -223,6 +230,7 @@ function EntryList({
 }: {
   entries: ConversationEntry[];
   workspaces: WorkspaceState[];
+  defaultWorkspacePath: string;
   activeId: string | null;
   generatingIds: Set<string>;
   onSelect: (id: string, workspaceId: string) => void;
@@ -235,7 +243,11 @@ function EntryList({
         <ConversationRow
           key={entry.conversation.id}
           entry={entry}
-          workspaceLabel={workspaceName(workspaces, entry.workspaceId)}
+          workspaceLabel={
+            defaultWorkspacePath && entry.workspaceId === defaultWorkspacePath
+              ? undefined
+              : workspaceName(workspaces, entry.workspaceId)
+          }
           isActive={entry.conversation.id === activeId}
           isGenerating={generatingIds.has(entry.conversation.id)}
           onSelect={() => onSelect(entry.conversation.id, entry.workspaceId)}
@@ -268,6 +280,7 @@ export default function Sidebar({
   defaultEngine,
   onDefaultEngineChange,
   engineStatuses,
+  engineModelConfigs,
   defaultWorkspacePath,
 }: SidebarProps) {
   const [search, setSearch] = useState("");
@@ -288,22 +301,8 @@ export default function Sidebar({
     return () => document.removeEventListener("mousedown", handleClick);
   }, [wsDropdownOpen]);
 
-  const [newAgentWsOpen, setNewAgentWsOpen] = useState(false);
-  const newAgentWsRef = useRef<HTMLDivElement>(null);
-
-  // Close new-agent workspace dropdown on outside clicks
-  useEffect(() => {
-    if (!newAgentWsOpen) return;
-    const handleClick = (e: MouseEvent) => {
-      if (newAgentWsRef.current && !newAgentWsRef.current.contains(e.target as Node)) {
-        setNewAgentWsOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
-  }, [newAgentWsOpen]);
-
   const [historyExpanded, setHistoryExpanded] = useState(false);
+  const [newAgentModalOpen, setNewAgentModalOpen] = useState(false);
 
   // The auto-created default workspace (the configured default working dir) is
   // hidden from the UI — it stays as the implicit CWD but never appears in the
@@ -313,6 +312,33 @@ export default function Sidebar({
     () => workspaces.filter((w) => w.path !== defaultWorkspacePath),
     [workspaces, defaultWorkspacePath],
   );
+
+  const defaultWorkspace = useMemo<WorkspaceState | null>(() => {
+    if (!defaultWorkspacePath) return null;
+    const base = defaultWorkspacePath.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? defaultWorkspacePath;
+    return (
+      workspaces.find((w) => w.path === defaultWorkspacePath) ?? {
+        id: defaultWorkspacePath,
+        path: defaultWorkspacePath,
+        name: base,
+      }
+    );
+  }, [workspaces, defaultWorkspacePath]);
+
+  const newAgentWorkspaceOptions = useMemo(() => {
+    const out: WorkspaceState[] = [];
+    const seen = new Set<string>();
+    if (defaultWorkspace && !seen.has(defaultWorkspace.id)) {
+      out.push(defaultWorkspace);
+      seen.add(defaultWorkspace.id);
+    }
+    for (const ws of visibleWorkspaces) {
+      if (seen.has(ws.id)) continue;
+      out.push(ws);
+      seen.add(ws.id);
+    }
+    return out;
+  }, [defaultWorkspace, visibleWorkspaces]);
 
   const filtered = useMemo(() => {
     let list = entries;
@@ -350,14 +376,10 @@ export default function Sidebar({
     () => !!activeId && historyEntries.some((e) => e.conversation.id === activeId),
     [activeId, historyEntries],
   );
-
-  useEffect(() => {
-    if (activeInHistory) setHistoryExpanded(true);
-  }, [activeInHistory]);
+  const showHistoryExpanded = historyExpanded || activeInHistory;
 
   const isSearching = search.trim().length > 0;
-  const newAgentTargetWs =
-    workspaceFilter ?? visibleWorkspaces[0]?.id ?? (defaultWorkspacePath || null);
+  const newAgentTargetWs = workspaceFilter ?? newAgentWorkspaceOptions[0]?.id ?? null;
 
   return (
     <>
@@ -503,6 +525,7 @@ export default function Sidebar({
             <EntryList
               entries={sortEntries(filtered, generatingIds)}
               workspaces={workspaces}
+              defaultWorkspacePath={defaultWorkspacePath}
               activeId={activeId}
               generatingIds={generatingIds}
               onSelect={onSelect}
@@ -517,6 +540,7 @@ export default function Sidebar({
                   <EntryList
                     entries={activeEntries}
                     workspaces={workspaces}
+                    defaultWorkspacePath={defaultWorkspacePath}
                     activeId={activeId}
                     generatingIds={generatingIds}
                     onSelect={onSelect}
@@ -532,13 +556,20 @@ export default function Sidebar({
                     label="History"
                     count={historyEntries.length}
                     collapsible
-                    expanded={historyExpanded}
-                    onToggle={() => setHistoryExpanded((v) => !v)}
+                    expanded={showHistoryExpanded}
+                    onToggle={() => {
+                      if (activeInHistory) {
+                        setHistoryExpanded(true);
+                        return;
+                      }
+                      setHistoryExpanded((v) => !v);
+                    }}
                   />
-                  {historyExpanded && (
+                  {showHistoryExpanded && (
                     <EntryList
                       entries={historyEntries}
                       workspaces={workspaces}
+                      defaultWorkspacePath={defaultWorkspacePath}
                       activeId={activeId}
                       generatingIds={generatingIds}
                       onSelect={onSelect}
@@ -554,67 +585,37 @@ export default function Sidebar({
 
         {/* Bottom bar */}
         <div className="px-3 py-2 border-t border-[var(--border-color)] space-y-1.5">
-          <div className="flex items-center gap-2">
-            <label className="text-[10px] text-[var(--text-secondary)] shrink-0">Engine</label>
-            <select
-              value={defaultEngine}
-              onChange={(e) => onDefaultEngineChange(e.target.value as AgentEngineId)}
-              className="flex-1 min-w-0 text-xs rounded-lg px-2 py-1.5 bg-[var(--bg-primary)] border border-[var(--border-color)] text-[var(--text-primary)]"
-              title="Default engine for new sessions"
-            >
-              {AGENT_ENGINES.map((e) => {
-                const status = engineStatuses.find((s) => s.id === e.id);
-                const suffix = status?.available ? "" : " (unavailable)";
-                return (
-                  <option key={e.id} value={e.id}>
-                    {e.label}{suffix}
-                  </option>
-                );
-              })}
-            </select>
-          </div>
-          <div className="relative flex gap-1" ref={newAgentWsRef}>
+          <div className="flex gap-1.5">
             <button
-              onClick={() => onNew(newAgentTargetWs ?? undefined)}
-              className="flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-xs font-medium transition-colors"
+              type="button"
+              onClick={() => onNew({ workspaceId: newAgentTargetWs ?? undefined, engine: defaultEngine })}
+              className="flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              disabled={!newAgentTargetWs}
+              title={newAgentTargetWs ? "New agent (defaults)" : "Add a workspace first"}
             >
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
-                <path d="M7 1v12M1 7h12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" fill="none" />
-              </svg>
+              <EngineBadge engine={defaultEngine} tone="onAccent" />
               New Agent
-              {newAgentTargetWs && visibleWorkspaces.length > 1 && (
-                <span className="opacity-70 font-normal">
-                  in {workspaceName(workspaces, newAgentTargetWs)}
-                </span>
-              )}
             </button>
-            {visibleWorkspaces.length > 1 && (
-              <button
-                onClick={() => setNewAgentWsOpen(!newAgentWsOpen)}
-                className="px-2 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white transition-colors"
-                title="New agent in another workspace"
-              >
-                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" className={`transition-transform duration-200 ${newAgentWsOpen ? "rotate-180" : ""}`}>
-                  <path d="M3 5l3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </button>
-            )}
-            {newAgentWsOpen && visibleWorkspaces.length > 1 && (
-              <div className="absolute bottom-full right-3 left-3 z-50 mb-1 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg shadow-lg overflow-hidden">
-                {visibleWorkspaces.map((ws) => (
-                  <button
-                    key={ws.id}
-                    onClick={() => {
-                      onNew(ws.id);
-                      setNewAgentWsOpen(false);
-                    }}
-                    className="w-full text-left px-3 py-2 text-xs text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] transition-colors truncate"
-                  >
-                    📁 {ws.name}
-                  </button>
-                ))}
-              </div>
-            )}
+            <button
+              type="button"
+              onClick={() => setNewAgentModalOpen(true)}
+              className="shrink-0 flex items-center justify-center px-2 py-2 rounded-lg bg-[var(--bg-tertiary)] hover:opacity-90 text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+              disabled={!newAgentTargetWs}
+              title="Advanced options"
+            >
+              {/* Sliders icon */}
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="4" y1="21" x2="4" y2="14" />
+                <line x1="4" y1="10" x2="4" y2="3" />
+                <line x1="12" y1="21" x2="12" y2="12" />
+                <line x1="12" y1="8" x2="12" y2="3" />
+                <line x1="20" y1="21" x2="20" y2="16" />
+                <line x1="20" y1="12" x2="20" y2="3" />
+                <line x1="2" y1="14" x2="6" y2="14" />
+                <line x1="10" y1="8" x2="14" y2="8" />
+                <line x1="18" y1="16" x2="22" y2="16" />
+              </svg>
+            </button>
           </div>
           <button
             onClick={onOpenTasks}
@@ -656,6 +657,21 @@ export default function Sidebar({
           </button>
         </div>
       </aside>
+
+      {newAgentModalOpen && (
+        <NewAgentModal
+          workspaces={newAgentWorkspaceOptions}
+          defaultWorkspaceId={newAgentTargetWs}
+          defaultEngine={defaultEngine}
+          engineStatuses={engineStatuses}
+          engineModelConfigs={engineModelConfigs}
+          onDefaultEngineChange={onDefaultEngineChange}
+          onCreate={({ workspaceId, engine, model }) => {
+            onNew({ workspaceId, engine, model });
+          }}
+          onClose={() => setNewAgentModalOpen(false)}
+        />
+      )}
     </>
   );
 }
