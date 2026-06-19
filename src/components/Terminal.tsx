@@ -8,14 +8,28 @@ import "xterm/css/xterm.css";
 interface TerminalProps {
   id: string;
   cwd: string;
+  onExit?: (id: string) => void;
 }
 
-export default function Terminal({ id, cwd }: TerminalProps) {
+export default function Terminal({ id, cwd, onExit }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  // True once the backend reported the child process exited. Used by cleanup to
+  // avoid calling `pty_kill` on an already-dead session (the reader thread has
+  // ended and the map entry may already be gone, so a kill call would error).
+  const exitedRef = useRef(false);
+  // Keep the latest onExit without adding it to the effect deps — an inline
+  // parent callback would otherwise retrigger the effect (and respawn the PTY)
+  // on every RightPanel render. Read via ref at the call site instead.
+  const onExitRef = useRef(onExit);
+  useEffect(() => {
+    onExitRef.current = onExit;
+  }, [onExit]);
 
   useEffect(() => {
+    // Reset on each (re)spawn — a remount with a new id starts a fresh process.
+    exitedRef.current = false;
     const container = containerRef.current;
     if (!container) return;
 
@@ -86,6 +100,15 @@ export default function Terminal({ id, cwd }: TerminalProps) {
       }
     }).then((fn) => { unlisten = fn; });
 
+    // Listen for process exit so the parent can respawn / show an overlay.
+    let unlistenExit: UnlistenFn | null = null;
+    listen<{ id: string }>("pty-exit", (event) => {
+      if (event.payload.id === id && !exitedRef.current) {
+        exitedRef.current = true;
+        onExitRef.current?.(id);
+      }
+    }).then((fn) => { unlistenExit = fn; });
+
     // Send user input to PTY
     term.onData((data) => {
       invoke("pty_write", { id, data }).catch(() => {});
@@ -93,8 +116,13 @@ export default function Terminal({ id, cwd }: TerminalProps) {
 
     return () => {
       resizeObserver.disconnect();
-      invoke("pty_kill", { id }).catch(() => {});
+      // Only kill if the process is still alive — if it exited on its own the
+      // backend reader thread has ended and the session may already be gone.
+      if (!exitedRef.current) {
+        invoke("pty_kill", { id }).catch(() => {});
+      }
       if (unlisten) unlisten();
+      if (unlistenExit) unlistenExit();
       term.dispose();
     };
   }, [id, cwd]);

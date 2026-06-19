@@ -73,7 +73,7 @@ const ConversationRow = memo(function ConversationRow({
   onRename,
 }: {
   entry: ConversationEntry;
-  workspaceLabel: string;
+  workspaceLabel?: string;
   isActive: boolean;
   isGenerating: boolean;
   onSelect: () => void;
@@ -141,12 +141,16 @@ const ConversationRow = memo(function ConversationRow({
             </p>
           )}
         </div>
-          <p className="text-[10px] mt-0.5 opacity-60 truncate">
-          <span className="text-[var(--accent)]/80">{workspaceLabel}</span>
-          <span className="mx-1">·</span>
+        <p className="text-[10px] mt-0.5 opacity-60 truncate flex items-center gap-1.5">
+          {workspaceLabel ? (
+            <>
+              <span className="text-[var(--accent)]/80 truncate">{workspaceLabel}</span>
+              <span className="opacity-60">·</span>
+            </>
+          ) : null}
           <EngineBadge engine={conv.engine} />
-          <span className="mx-1">·</span>
-          {relativeTime(conv.updatedAt)}
+          <span className="opacity-60">·</span>
+          <span>{relativeTime(conv.updatedAt)}</span>
         </p>
       </div>
       <button
@@ -217,6 +221,7 @@ function SectionHeader({
 function EntryList({
   entries,
   workspaces,
+  defaultWorkspacePath,
   activeId,
   generatingIds,
   onSelect,
@@ -225,6 +230,7 @@ function EntryList({
 }: {
   entries: ConversationEntry[];
   workspaces: WorkspaceState[];
+  defaultWorkspacePath: string;
   activeId: string | null;
   generatingIds: Set<string>;
   onSelect: (id: string, workspaceId: string) => void;
@@ -237,7 +243,11 @@ function EntryList({
         <ConversationRow
           key={entry.conversation.id}
           entry={entry}
-          workspaceLabel={workspaceName(workspaces, entry.workspaceId)}
+          workspaceLabel={
+            defaultWorkspacePath && entry.workspaceId === defaultWorkspacePath
+              ? undefined
+              : workspaceName(workspaces, entry.workspaceId)
+          }
           isActive={entry.conversation.id === activeId}
           isGenerating={generatingIds.has(entry.conversation.id)}
           onSelect={() => onSelect(entry.conversation.id, entry.workspaceId)}
@@ -305,11 +315,12 @@ export default function Sidebar({
 
   const defaultWorkspace = useMemo<WorkspaceState | null>(() => {
     if (!defaultWorkspacePath) return null;
+    const base = defaultWorkspacePath.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? defaultWorkspacePath;
     return (
       workspaces.find((w) => w.path === defaultWorkspacePath) ?? {
         id: defaultWorkspacePath,
         path: defaultWorkspacePath,
-        name: "Default",
+        name: base,
       }
     );
   }, [workspaces, defaultWorkspacePath]);
@@ -369,6 +380,7 @@ export default function Sidebar({
 
   const isSearching = search.trim().length > 0;
   const newAgentTargetWs = workspaceFilter ?? newAgentWorkspaceOptions[0]?.id ?? null;
+  const isDefaultNewAgentWs = !!defaultWorkspacePath && newAgentTargetWs === defaultWorkspacePath;
   const newAgentTargetWsLabel = newAgentTargetWs ? workspaceName(workspaces, newAgentTargetWs) : "";
 
   return (
@@ -515,6 +527,7 @@ export default function Sidebar({
             <EntryList
               entries={sortEntries(filtered, generatingIds)}
               workspaces={workspaces}
+              defaultWorkspacePath={defaultWorkspacePath}
               activeId={activeId}
               generatingIds={generatingIds}
               onSelect={onSelect}
@@ -529,6 +542,7 @@ export default function Sidebar({
                   <EntryList
                     entries={activeEntries}
                     workspaces={workspaces}
+                    defaultWorkspacePath={defaultWorkspacePath}
                     activeId={activeId}
                     generatingIds={generatingIds}
                     onSelect={onSelect}
@@ -557,6 +571,7 @@ export default function Sidebar({
                     <EntryList
                       entries={historyEntries}
                       workspaces={workspaces}
+                      defaultWorkspacePath={defaultWorkspacePath}
                       activeId={activeId}
                       generatingIds={generatingIds}
                       onSelect={onSelect}
@@ -609,9 +624,12 @@ export default function Sidebar({
           {newAgentTargetWs && (
             <div className="text-[10px] text-[var(--text-secondary)] truncate" title={newAgentTargetWs}>
               <EngineBadge engine={defaultEngine} />
-              <span className="mx-1">·</span>
-              {newAgentTargetWsLabel}
-              {defaultWorkspacePath && newAgentTargetWs === defaultWorkspacePath ? " (default)" : ""}
+              {!isDefaultNewAgentWs && (
+                <>
+                  <span className="mx-1">·</span>
+                  {newAgentTargetWsLabel}
+                </>
+              )}
             </div>
           )}
           <button
@@ -659,7 +677,6 @@ export default function Sidebar({
         <NewAgentModal
           workspaces={newAgentWorkspaceOptions}
           defaultWorkspaceId={newAgentTargetWs}
-          defaultWorkspacePath={defaultWorkspacePath}
           defaultEngine={defaultEngine}
           engineStatuses={engineStatuses}
           engineModelConfigs={engineModelConfigs}

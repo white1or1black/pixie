@@ -207,7 +207,7 @@ export const ENGINE_MODEL_FIELDS: Record<
   claude: [
     { key: "ANTHROPIC_API_KEY", label: "API Key", secret: true },
     { key: "ANTHROPIC_BASE_URL", label: "Base URL" },
-    { key: "ANTHROPIC_MODEL", label: "Default Model" },
+    { key: "ANTHROPIC_MODEL", label: "Model" },
     { key: "ANTHROPIC_DEFAULT_OPUS_MODEL", label: "Opus Model" },
     { key: "ANTHROPIC_DEFAULT_SONNET_MODEL", label: "Sonnet Model" },
     { key: "ANTHROPIC_DEFAULT_HAIKU_MODEL", label: "Haiku Model" },

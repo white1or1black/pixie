@@ -23,7 +23,11 @@ import type {
 import { AGENT_ENGINES } from "../types";
 import { getConfig, getHistory, setHistory, updateConfig } from "../lib/storage";
 
-const DEFAULT_WORKSPACE_NAME = "Default";
+function basename(p: string): string {
+  const norm = p.replace(/\\/g, "/");
+  const parts = norm.split("/").filter(Boolean);
+  return parts[parts.length - 1] ?? p;
+}
 
 function normalizeConversation(conv: Conversation): Conversation {
   return {
@@ -463,7 +467,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
 
       let wsList = workspaces;
       if (wsList.length === 0 && configuredDefault) {
-        wsList = [{ id: configuredDefault, path: configuredDefault, name: DEFAULT_WORKSPACE_NAME }];
+        wsList = [{ id: configuredDefault, path: configuredDefault, name: basename(configuredDefault) }];
         conversations[configuredDefault] = conversations[configuredDefault] ?? [];
       }
       const legacyActivePath = raw.workspaces.find((w) => w.id === raw.activeWorkspaceId)?.path;

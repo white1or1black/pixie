@@ -112,6 +112,14 @@ export default function InputBar({
   const modelWrapperRef = useRef<HTMLDivElement>(null);
   const modelDropdownListRef = useRef<HTMLDivElement>(null);
 
+  const configuredDefaultModelId = useCallback((): string | undefined => {
+    if (!engine) return undefined;
+    const cfg = engineModelConfigs[engine] as Record<string, string | undefined>;
+    const v = cfg?.[ENGINE_MODEL_ENV_KEY[engine]];
+    const trimmed = typeof v === "string" ? v.trim() : "";
+    return trimmed || undefined;
+  }, [engine, engineModelConfigs]);
+
   // Close any open dropdown the moment the input becomes disabled (e.g. the
   // active workspace is removed). Adjusting state during render avoids a
   // setState-in-effect; React discards the in-progress render and re-renders.
@@ -317,10 +325,8 @@ export default function InputBar({
     });
   }, [modelDropdownOpen]);
 
-  // Fetch available models lazily — only when the model dropdown opens.
-  const fetchModels = useCallback(() => {
-    if (!engine) return;
-    invoke<ModelEntry[]>("list_models", { engine })
+  const fetchModelsForEngine = useCallback((engineId: AgentEngineId) => {
+    invoke<ModelEntry[]>("list_models", { engine: engineId })
       .then((models) => {
         const seen = new Set<string>();
         const deduped: ModelEntry[] = [];
@@ -335,13 +341,20 @@ export default function InputBar({
       .catch(() => {
         setAvailableModels([]);
       });
-  }, [engine]);
+  }, []);
+
+  // Keep a model list for the active engine so the default model label can be
+  // shown even when the dropdown is closed.
+  useEffect(() => {
+    if (!engine) return;
+    fetchModelsForEngine(engine);
+  }, [engine, fetchModelsForEngine]);
 
   useEffect(() => {
     if (modelDropdownOpen && engine) {
-      fetchModels();
+      fetchModelsForEngine(engine);
     }
-  }, [modelDropdownOpen, engine, fetchModels]);
+  }, [modelDropdownOpen, engine, fetchModelsForEngine]);
 
   const handleSelectModel = useCallback((modelId: string | undefined) => {
     onModelChange(modelId);
@@ -373,6 +386,15 @@ export default function InputBar({
   const charCount = value.length;
   const nearLimit = charCount > MAX_CHARS * 0.9;
   const canSend = (value.trim().length > 0 || attachments.length > 0) && !disabled;
+
+  const defaultModelLabel = (() => {
+    if (!engine) return "Auto";
+    const configured = configuredDefaultModelId();
+    const fallback = availableModels[0]?.id;
+    const id = configured ?? fallback;
+    if (!id) return "Auto";
+    return availableModels.find((m) => m.id === id)?.label ?? id;
+  })();
 
   return (
     <div className="border-t border-[var(--border-color)] bg-[var(--bg-primary)] px-4 py-3">
@@ -551,7 +573,7 @@ export default function InputBar({
                 <span className="truncate max-w-[100px]">
                   {model
                     ? (availableModels.find((m) => m.id === model)?.label ?? model)
-                    : "Default"}
+                    : defaultModelLabel}
                 </span>
               </button>
               {modelDropdownOpen && (
@@ -566,7 +588,7 @@ export default function InputBar({
                       !model ? "text-[var(--accent)] font-medium" : "text-[var(--text-primary)]"
                     }`}
                   >
-                    Default{(() => { const v = (engineModelConfigs[engine] as Record<string, string | undefined>)?.[ENGINE_MODEL_ENV_KEY[engine]]; return v ? ` (${v})` : ""; })()}
+                    {defaultModelLabel} (auto)
                   </button>
                   {availableModels.map((m) => (
                     <button

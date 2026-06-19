@@ -135,10 +135,10 @@ export default function Settings({
             </div>
           </section>
 
-          {/* Default engine for new sessions */}
+          {/* Preferred engine for new sessions */}
           <section>
             <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">
-              Default Engine
+              Preferred Engine
             </h3>
             <select
               value={defaultEngine}
@@ -156,10 +156,10 @@ export default function Settings({
             </p>
           </section>
 
-          {/* Default working directory */}
+          {/* Working directory */}
           <section>
             <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">
-              Default Working Directory
+              Working Directory
             </h3>
             <div className="bg-[var(--bg-primary)] rounded-xl p-4 border border-[var(--border-color)]">
               <p className="text-xs text-[var(--text-secondary)] break-all font-mono mb-3">
@@ -181,7 +181,7 @@ export default function Settings({
               </div>
             </div>
             <p className="text-xs text-[var(--text-secondary)] mt-2">
-              The folder Pixie uses by default. Applied on a fresh start with no
+              The folder Pixie uses when none is selected. Applied on a fresh start with no
               workspaces added — existing workspaces are not changed.
             </p>
           </section>

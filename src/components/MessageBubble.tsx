@@ -383,7 +383,7 @@ function ToolStepCardImpl({ step, onOpenPreview }: { step: ToolStep; onOpenPrevi
   }, [step.status]);
 
   const { label, target, open: openable } = describeTool(step);
-  const diffStat = useMemo(() => diffStats(step), [step.name, step.input]);
+  const diffStat = useMemo(() => diffStats(step), [step]);
   const isRunning = step.status === "running";
   const hasResult = Boolean(step.result);
   const lname = step.name.toLowerCase();

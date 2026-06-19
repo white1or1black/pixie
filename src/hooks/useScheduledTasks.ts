@@ -29,7 +29,8 @@ export function useScheduledTasks() {
   }, []);
 
   useEffect(() => {
-    refresh();
+    const t = window.setTimeout(() => { void refresh(); }, 0);
+    return () => window.clearTimeout(t);
   }, [refresh]);
 
   // Refresh on focus: the scheduler can fire while the window is hidden in the tray.

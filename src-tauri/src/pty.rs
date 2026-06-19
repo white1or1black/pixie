@@ -83,7 +83,9 @@ pub fn spawn_pty(
     let app_clone = app.clone();
     let id_clone = id.to_string();
 
-    // Reader thread
+    // Reader thread. Emits `pty-output` for data and a final `pty-exit` when
+    // the child process terminates (EOF or read error), so the frontend can
+    // react — e.g. show an exited overlay or auto-respawn the last terminal.
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
@@ -99,6 +101,7 @@ pub fn spawn_pty(
                 Err(_) => break,
             }
         }
+        let _ = app_clone.emit("pty-exit", serde_json::json!({ "id": id_clone }));
     });
 
     let mut map = pty_map.lock().unwrap();

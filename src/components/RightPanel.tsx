@@ -37,6 +37,7 @@ const MIN_HISTORY_HEIGHT = 120;
 const PREVIEW_CODE_STYLE: CSSProperties = { margin: 0, borderRadius: 0, fontSize: "0.75rem", flex: 1 };
 const MD_CODE_STYLE: CSSProperties = { margin: 0, borderRadius: "0.5rem", fontSize: "0.75rem" };
 const REMARK_PLUGINS = [remarkGfm];
+const shellEscape = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
 interface CodeBlockProps {
   code: string;
@@ -148,16 +149,119 @@ function RightPanelImpl({ workspacePath, previewTarget }: RightPanelProps) {
   const isResizingChanges = useRef(false);
   const didInitChangesHeight = useRef(false);
 
-  // Workspaces whose terminal has been opened at least once. Each gets a
-  // permanently-mounted Terminal (its own PTY) so scrollback and any running
-  // process survive tab switches, panel close/reopen, and workspace switches.
-  const [terminalWs, setTerminalWs] = useState<string[]>([]);
-
-  // Lazily mount a persistent terminal the first time the terminal tab is opened
-  // in a workspace; it then stays alive for the whole session.
-  if (tab === "terminal" && workspacePath && !terminalWs.includes(workspacePath)) {
-    setTerminalWs((prev) => [...prev, workspacePath]);
+  // Per-workspace terminal instances. Each workspace maintains a list of
+  // terminals (each its own PTY) that stay mounted for the whole session so
+  // scrollback and any running process survive tab switches, panel close/reopen,
+  // and workspace switches. At least one terminal per workspace is always kept.
+  interface TerminalInstance {
+    id: string;
+    label: string;
+    exited: boolean;
   }
+  const [terminalsByWs, setTerminalsByWs] = useState<Record<string, TerminalInstance[]>>({});
+  // Which terminal instance is currently visible per workspace.
+  const [activeTermId, setActiveTermId] = useState<Record<string, string>>({});
+  // Monotonic counter so terminal ids stay unique even after add/remove cycles.
+  const termSeqRef = useRef(0);
+
+  const makeTerminalId = useCallback((ws: string) => {
+    termSeqRef.current += 1;
+    return `term-${ws}-${termSeqRef.current}`;
+  }, []);
+
+  const ensureWorkspaceTerminals = useCallback(
+    (ws: string) => {
+      setTerminalsByWs((prev) => {
+        if (prev[ws] && prev[ws].length > 0) return prev;
+        const id = makeTerminalId(ws);
+        setActiveTermId((a) => ({ ...a, [ws]: id }));
+        return { ...prev, [ws]: [{ id, label: "Terminal 1", exited: false }] };
+      });
+    },
+    [makeTerminalId],
+  );
+
+  // Lazily seed a terminal the first time the terminal tab is opened in a
+  // workspace; it (and any later-added siblings) then stays alive for the
+  // whole session.
+  if (tab === "terminal" && workspacePath && !terminalsByWs[workspacePath]) {
+    ensureWorkspaceTerminals(workspacePath);
+  }
+
+  const createTerminal = useCallback(
+    (ws: string) => {
+      setTerminalsByWs((prev) => {
+        const id = makeTerminalId(ws);
+        const next = [
+          ...(prev[ws] ?? []),
+          { id, label: `Terminal ${(prev[ws]?.length ?? 0) + 1}`, exited: false },
+        ];
+        setActiveTermId((a) => ({ ...a, [ws]: id }));
+        return { ...prev, [ws]: next };
+      });
+    },
+    [makeTerminalId],
+  );
+
+  const closeTerminal = useCallback(
+    (ws: string, id: string) => {
+      setTerminalsByWs((prev) => {
+        const list = prev[ws] ?? [];
+        // Enforce the minimum-one rule: never close the last terminal.
+        if (list.length <= 1) return prev;
+        const next = list.filter((t) => t.id !== id);
+        setActiveTermId((a) => {
+          if (a[ws] !== id) return a;
+          return { ...a, [ws]: next[0].id };
+        });
+        return { ...prev, [ws]: next };
+        // Note: the Terminal component for `id` unmounts (it's no longer in the
+        // list) and its cleanup kills the PTY.
+      });
+    },
+    [],
+  );
+
+  const restartTerminal = useCallback(
+    (ws: string, id: string) => {
+      // Remount the Terminal with a fresh id so a clean xterm + fresh PTY are
+      // spawned. The old component unmounts; since the process already exited
+      // its cleanup skips pty_kill.
+      setTerminalsByWs((prev) => {
+        const list = prev[ws] ?? [];
+        const newId = makeTerminalId(ws);
+        const next = list.map((t) =>
+          t.id === id ? { id: newId, label: t.label, exited: false } : t,
+        );
+        setActiveTermId((a) => ({ ...a, [ws]: newId }));
+        return { ...prev, [ws]: next };
+      });
+    },
+    [makeTerminalId],
+  );
+
+  const handleTerminalExit = useCallback(
+    (ws: string, id: string) => {
+      setTerminalsByWs((prev) => {
+        const list = prev[ws];
+        if (!list) return prev;
+        const inst = list.find((t) => t.id === id);
+        if (!inst) return prev; // late event after close — ignore
+        // Last terminal standing: auto-respawn so at least one always remains.
+        if (list.length === 1) {
+          const newId = makeTerminalId(ws);
+          setActiveTermId((a) => ({ ...a, [ws]: newId }));
+          return { ...prev, [ws]: [{ id: newId, label: inst.label, exited: false }] };
+        }
+        // Others remain — mark this one exited so an overlay offers restart.
+        return {
+          ...prev,
+          [ws]: list.map((t) => (t.id === id ? { ...t, exited: true } : t)),
+        };
+      });
+    },
+    [makeTerminalId],
+  );
 
   const loadDirectory = useCallback(async (path: string) => {
     setLoading(true);
@@ -168,15 +272,14 @@ function RightPanelImpl({ workspacePath, previewTarget }: RightPanelProps) {
     finally { setLoading(false); }
   }, []);
 
-  const shellEscape = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
-  const toAbsPath = (p: string) => {
+  const toAbsPath = useCallback((p: string) => {
     // macOS/Linux absolute, Windows drive absolute, or relative-to-workspace.
     const isAbsPosix = p.startsWith("/");
     const isAbsWin = /^[a-zA-Z]:\\/.test(p);
     if (isAbsPosix || isAbsWin) return p;
     const ws = workspacePath.endsWith("/") ? workspacePath.slice(0, -1) : workspacePath;
     return `${ws}/${p.replace(/^\.?\//, "")}`;
-  };
+  }, [workspacePath]);
 
   const revealInFileManager = useCallback(async (path: string) => {
     try {
@@ -191,9 +294,12 @@ function RightPanelImpl({ workspacePath, previewTarget }: RightPanelProps) {
         console.error("Failed to reveal in file manager", { path, workspacePath, err, fallbackErr });
       }
     }
-  }, [workspacePath]);
+  }, [toAbsPath, workspacePath]);
 
-  useEffect(() => { loadDirectory(currentPath); }, [currentPath, loadDirectory]);
+  useEffect(() => {
+    const t = window.setTimeout(() => { void loadDirectory(currentPath); }, 0);
+    return () => window.clearTimeout(t);
+  }, [currentPath, loadDirectory]);
 
   // Load git data (status, log, and the uncommitted working-tree diff) when the
   // git tab is active. Exposed as `loadGit` so the Changes header can refresh on
@@ -651,7 +757,7 @@ function RightPanelImpl({ workspacePath, previewTarget }: RightPanelProps) {
                     </div>
                     {gitLog ? (
                       gitLog.split("\n").filter(Boolean).map((line) => {
-                        const hash = line.match(/^[\*\s\|\\\/]*([a-f0-9]{7,})/)?.[1];
+                        const hash = line.match(/^[*\s|\\/]*([a-f0-9]{7,})/)?.[1];
                         return (
                           <div
                             key={line}
@@ -694,20 +800,109 @@ function RightPanelImpl({ workspacePath, previewTarget }: RightPanelProps) {
         )}
 
         {/* === TERMINAL TAB === */}
-        {/* Persistent per-workspace terminals. Each is mounted once (the first
-            time the terminal tab is opened in that workspace) and kept alive for
-            the session, so scrollback and any running process survive tab
-            switches, panel close/reopen, and workspace switches. Only the active
-            workspace's terminal is shown, and only while the terminal tab is on. */}
-        {terminalWs.map((ws) => (
-          <div
-            key={ws}
-            className="absolute inset-0 flex flex-col"
-            style={{ display: tab === "terminal" && ws === workspacePath ? "flex" : "none" }}
-          >
-            <Terminal id={`term-${ws}`} cwd={ws} />
-          </div>
-        ))}
+        {/* Persistent per-workspace terminals. Each workspace keeps a list of
+            terminal instances (each its own PTY) mounted for the whole
+            session, so scrollback and any running process survive tab
+            switches, panel close/reopen, and workspace switches. Only the
+            active workspace's terminals are shown, and only while the
+            terminal tab is on. A tab strip lets the user open/close/switch
+            between multiple terminals; at least one per workspace is always
+            kept, and if the last one's shell exits it auto-respawns. */}
+        {Object.entries(terminalsByWs).map(([ws, instances]) => {
+          const isThisWs = tab === "terminal" && ws === workspacePath;
+          const activeId = activeTermId[ws] ?? instances[0]?.id;
+          return (
+            <div
+              key={ws}
+              className="absolute inset-0 flex flex-col"
+              style={{ display: isThisWs ? "flex" : "none" }}
+            >
+              {/* Tab strip — only rendered for the visible workspace. */}
+              {isThisWs && (
+                <div className="flex items-center gap-0.5 px-1 py-1 border-b border-[var(--border-color)] bg-[var(--bg-secondary)] shrink-0 overflow-x-auto">
+                  {instances.map((inst) => {
+                    const isActive = inst.id === activeId;
+                    const canClose = instances.length > 1;
+                    return (
+                      <div
+                        key={inst.id}
+                        className={`group flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-t text-[11px] transition-colors whitespace-nowrap ${
+                          isActive
+                            ? "bg-[var(--bg-tertiary)] text-[var(--text-primary)]"
+                            : "text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]"
+                        }`}
+                        onClick={() => setActiveTermId((a) => ({ ...a, [ws]: inst.id }))}
+                        role="button"
+                      >
+                        <span className={inst.exited ? "opacity-60" : ""}>{inst.label}</span>
+                        <button
+                          type="button"
+                          title={canClose ? "Close terminal" : "At least one terminal must remain"}
+                          disabled={!canClose}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (canClose) closeTerminal(ws, inst.id);
+                          }}
+                          className={`p-0.5 rounded hover:bg-[var(--bg-primary)] transition-colors ${
+                            canClose ? "text-[var(--text-secondary)] hover:text-[var(--text-primary)]" : "text-[var(--text-secondary)] opacity-30 cursor-not-allowed"
+                          }`}
+                        >
+                          <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                            <path d="M2 2l6 6M8 2l-6 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                          </svg>
+                        </button>
+                      </div>
+                    );
+                  })}
+                  <button
+                    type="button"
+                    title="New terminal"
+                    onClick={() => createTerminal(ws)}
+                    className="p-1 ml-0.5 rounded text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] transition-colors shrink-0"
+                  >
+                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                      <path d="M6 2v8M2 6h8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                    </svg>
+                  </button>
+                </div>
+              )}
+
+              {/* Terminal viewport. All instances stay mounted (hidden via
+                  display) so their PTYs and scrollback persist. */}
+              <div className="flex-1 relative min-h-0">
+                {instances.map((inst) => {
+                  const show = inst.id === activeId;
+                  return (
+                    <div
+                      key={inst.id}
+                      className="absolute inset-0 flex flex-col"
+                      style={{ display: show ? "flex" : "none" }}
+                    >
+                      {inst.exited ? (
+                        <div className="flex flex-col items-center justify-center h-full gap-3 bg-[#1a1b26] text-center px-4">
+                          <p className="text-xs text-[var(--text-secondary)]">Process exited</p>
+                          <button
+                            type="button"
+                            onClick={() => restartTerminal(ws, inst.id)}
+                            className="px-3 py-1 rounded bg-[var(--accent)] text-white text-xs hover:opacity-90 transition-opacity"
+                          >
+                            Restart
+                          </button>
+                        </div>
+                      ) : (
+                        <Terminal
+                          id={inst.id}
+                          cwd={ws}
+                          onExit={(tid) => handleTerminalExit(ws, tid)}
+                        />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
 
         </div>
       </div>

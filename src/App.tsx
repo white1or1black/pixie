@@ -394,10 +394,9 @@ function AppShell() {
                   )}
                   {(activeWorkspace || activeConversation) && (
                     <p className="text-[10px] text-[var(--text-secondary)] truncate" title={activeWorkspace?.path ?? undefined}>
-                      {activeWorkspace && (
+                      {activeWorkspace && defaultWorkspacePath && activeWorkspace.path !== defaultWorkspacePath && (
                         <>
                           📁 {activeWorkspace.name}
-                          {defaultWorkspacePath && activeWorkspace.path === defaultWorkspacePath ? " (default)" : ""}
                           {activeConversation && <span className="mx-1">·</span>}
                         </>
                       )}
