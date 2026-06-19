@@ -26,6 +26,9 @@ const CODE_EXTENSIONS = new Set([
 
 const MIN_WIDTH = 200;
 const DEFAULT_WIDTH = 320;
+const DEFAULT_CHANGES_HEIGHT = 260;
+const MIN_CHANGES_HEIGHT = 120;
+const MIN_HISTORY_HEIGHT = 120;
 
 // Hoisted to module scope for stable identity across renders — a prerequisite
 // for the memo()d highlighters below to skip re-tokenizing large content when
@@ -140,6 +143,10 @@ function RightPanelImpl({ workspacePath, previewTarget }: RightPanelProps) {
   const [gitWorkingDiff, setGitWorkingDiff] = useState("");
   const [diffViewMode, setDiffViewMode] = useState<DiffViewMode>("unified");
   const [changesCollapsed, setChangesCollapsed] = useState(false);
+  const [changesHeight, setChangesHeight] = useState(DEFAULT_CHANGES_HEIGHT);
+  const gitSplitRef = useRef<HTMLDivElement | null>(null);
+  const isResizingChanges = useRef(false);
+  const didInitChangesHeight = useRef(false);
 
   // Workspaces whose terminal has been opened at least once. Each gets a
   // permanently-mounted Terminal (its own PTY) so scrollback and any running
@@ -278,6 +285,63 @@ function RightPanelImpl({ workspacePath, previewTarget }: RightPanelProps) {
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
   };
+
+  // Drag handle between Changes and History in the Git tab.
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isResizingChanges.current) return;
+      const el = gitSplitRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const dividerH = 6;
+      const available = rect.height - dividerH;
+      const next = e.clientY - rect.top;
+      const maxChanges = Math.max(MIN_CHANGES_HEIGHT, available - MIN_HISTORY_HEIGHT);
+      const clamped = Math.min(maxChanges, Math.max(MIN_CHANGES_HEIGHT, next));
+      setChangesHeight(clamped);
+    };
+    const handleMouseUp = () => {
+      isResizingChanges.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, []);
+
+  const startChangesResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    isResizingChanges.current = true;
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+  };
+
+  // Initialize/clamp the split the first time the Git tab is shown so the
+  // default doesn't leave an oversized empty area on tall windows.
+  useEffect(() => {
+    if (tab !== "git") return;
+    const el = gitSplitRef.current;
+    if (!el) return;
+    requestAnimationFrame(() => {
+      const cur = gitSplitRef.current;
+      if (!cur) return;
+      const rect = cur.getBoundingClientRect();
+      const dividerH = 6;
+      const available = rect.height - dividerH;
+      const maxChanges = Math.max(MIN_CHANGES_HEIGHT, available - MIN_HISTORY_HEIGHT);
+      setChangesHeight((prev) => {
+        const base = didInitChangesHeight.current ? prev : Math.round(available * 0.5);
+        const next = Math.min(maxChanges, Math.max(MIN_CHANGES_HEIGHT, base));
+        didInitChangesHeight.current = true;
+        return next;
+      });
+    });
+  }, [tab]);
 
   const navigateTo = (path: string) => {
     setHistory((prev) => [...prev, currentPath]);
@@ -461,77 +525,96 @@ function RightPanelImpl({ workspacePath, previewTarget }: RightPanelProps) {
               </div>
             ) : (
               <>
-                {/* Working-tree (uncommitted) changes — the "new changes", rendered
-                    in the same DiffViewer as commit diffs. */}
-                <div className="border-b border-[var(--border-color)] shrink-0 flex flex-col min-h-0">
-                  <div className="flex items-center justify-between px-3 py-1.5 shrink-0">
-                    <button
-                      onClick={() => setChangesCollapsed((c) => !c)}
-                      className="flex items-center gap-1.5"
-                    >
-                      <span
-                        className="text-[10px] text-[var(--text-secondary)]"
-                        style={{ transform: changesCollapsed ? "rotate(-90deg)" : "none", transition: "transform 0.15s" }}
-                      >
-                        ▾
-                      </span>
-                      <span className="text-[11px] font-semibold text-[var(--text-secondary)]">Changes</span>
-                    </button>
-                    <div className="flex items-center gap-2">
-                      <DiffModeToggle mode={diffViewMode} onChange={setDiffViewMode} />
+                <div ref={gitSplitRef} className="flex-1 flex flex-col min-h-0">
+                  {/* Working-tree (uncommitted) changes — the "new changes", rendered
+                      in the same DiffViewer as commit diffs. */}
+                  <div
+                    className="border-b border-[var(--border-color)] flex flex-col min-h-0"
+                    style={changesCollapsed ? undefined : { height: changesHeight }}
+                  >
+                    <div className="flex items-center justify-between px-3 py-1.5 shrink-0">
                       <button
-                        onClick={loadGit}
-                        title="Refresh"
-                        className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)] transition-colors"
+                        onClick={() => setChangesCollapsed((c) => !c)}
+                        className="flex items-center gap-1.5"
                       >
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <path d="M21 12a9 9 0 1 1-3-6.7" />
-                          <path d="M21 3v6h-6" />
-                        </svg>
+                        <span
+                          className="text-[10px] text-[var(--text-secondary)]"
+                          style={{ transform: changesCollapsed ? "rotate(-90deg)" : "none", transition: "transform 0.15s" }}
+                        >
+                          ▾
+                        </span>
+                        <span className="text-[11px] font-semibold text-[var(--text-secondary)]">Changes</span>
                       </button>
+                      <div className="flex items-center gap-2">
+                        <DiffModeToggle mode={diffViewMode} onChange={setDiffViewMode} />
+                        <button
+                          onClick={loadGit}
+                          title="Refresh"
+                          className="p-0.5 rounded hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)] transition-colors"
+                        >
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M21 12a9 9 0 1 1-3-6.7" />
+                            <path d="M21 3v6h-6" />
+                          </svg>
+                        </button>
+                      </div>
                     </div>
+                    {!changesCollapsed && (
+                      <div className="flex-1 overflow-auto min-h-0">
+                        {gitWorkingDiff ? (
+                          <DiffViewer diff={gitWorkingDiff} viewMode={diffViewMode} />
+                        ) : (
+                          <p className="px-3 pb-2 text-xs text-[var(--text-secondary)]">No uncommitted changes</p>
+                        )}
+                        {untracked.length > 0 && (
+                          <div className="border-t border-[var(--border-color)]">
+                            <div className="px-3 py-1 text-[10px] text-[var(--text-secondary)]">Untracked</div>
+                            {untracked.map((f, i) => (
+                              <div key={i} className="px-3 py-0.5 text-[11px] font-mono text-[var(--text-secondary)] truncate">
+                                + {f}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
+
+                  {/* Drag handle: resize Changes vs History */}
                   {!changesCollapsed && (
-                    <div className="overflow-auto max-h-[45%]">
-                      {gitWorkingDiff ? (
-                        <DiffViewer diff={gitWorkingDiff} viewMode={diffViewMode} />
-                      ) : (
-                        <p className="px-3 pb-2 text-xs text-[var(--text-secondary)]">No uncommitted changes</p>
-                      )}
-                      {untracked.length > 0 && (
-                        <div className="border-t border-[var(--border-color)]">
-                          <div className="px-3 py-1 text-[10px] text-[var(--text-secondary)]">Untracked</div>
-                          {untracked.map((f, i) => (
-                            <div key={i} className="px-3 py-0.5 text-[11px] font-mono text-[var(--text-secondary)] truncate">
-                              + {f}
-                            </div>
-                          ))}
-                        </div>
-                      )}
+                    <div
+                      onMouseDown={startChangesResize}
+                      className="h-1.5 cursor-row-resize bg-transparent hover:bg-[var(--accent)]/30 active:bg-[var(--accent)]/40 transition-colors shrink-0"
+                      title="Drag to resize"
+                    />
+                  )}
+
+                  {/* Git Log */}
+                  <div className="flex-1 overflow-y-auto min-h-0">
+                    <div className="px-3 py-1.5 text-[11px] font-semibold text-[var(--text-secondary)] sticky top-0 bg-[var(--bg-secondary)]">
+                      History
                     </div>
-                  )}
-                </div>
-                {/* Git Log */}
-                <div className="flex-1 overflow-y-auto">
-                  <div className="px-3 py-1.5 text-[11px] font-semibold text-[var(--text-secondary)] sticky top-0 bg-[var(--bg-secondary)]">History</div>
-                  {gitLog ? (
-                    gitLog.split("\n").filter(Boolean).map((line) => {
-                      const hash = line.match(/^[\*\s\|\\\/]*([a-f0-9]{7,})/)?.[1];
-                      return (
-                        <div key={line}
-                          onClick={() => hash && viewCommitDiff(hash)}
-                          className={`px-3 py-1 text-xs font-mono cursor-pointer transition-colors truncate ${
-                            selectedCommit === hash
-                              ? "bg-[var(--accent)]/15 text-[var(--accent)]"
-                              : "text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
-                          }`}>
-                          {line}
-                        </div>
-                      );
-                    })
-                  ) : (
-                    <p className="text-xs text-[var(--text-secondary)] px-3 py-2">No commits</p>
-                  )}
+                    {gitLog ? (
+                      gitLog.split("\n").filter(Boolean).map((line) => {
+                        const hash = line.match(/^[\*\s\|\\\/]*([a-f0-9]{7,})/)?.[1];
+                        return (
+                          <div
+                            key={line}
+                            onClick={() => hash && viewCommitDiff(hash)}
+                            className={`px-3 py-1 text-xs font-mono cursor-pointer transition-colors truncate ${
+                              selectedCommit === hash
+                                ? "bg-[var(--accent)]/15 text-[var(--accent)]"
+                                : "text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
+                            }`}
+                          >
+                            {line}
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <p className="text-xs text-[var(--text-secondary)] px-3 py-2">No commits</p>
+                    )}
+                  </div>
                 </div>
                 {/* Diff */}
                 {gitDiff && (
