@@ -51,18 +51,73 @@ pub struct PersistentSession {
     stdout: Arc<Mutex<BufReader<ChildStdout>>>,
 }
 
+/// Lowercase extension of `path` ("" when none).
+fn ext_of(path: &str) -> String {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase()
+}
+
+/// MIME type for extensions Claude/CodeBuddy accept as **native** image content
+/// blocks. Returns `None` for everything else (incl. svg/bmp/ico) so those fall
+/// back to a `@mention` text block instead of an invalid image block.
+fn media_type_for_ext(ext: &str) -> Option<&'static str> {
+    match ext {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
 /// JSONL message format for `--input-format stream-json`.
-fn format_user_message(text: &str) -> String {
-    // Escape special characters in the text for JSON.
-    let escaped = text
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t");
-    format!(
-        r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"text","text":"{escaped}"}}]}}}}"#
-    )
+///
+/// Builds the `content` array from the text and any image attachments. Images
+/// whose extension maps to a native block are read from disk and embedded as
+/// `{"type":"image",...}` base64 blocks — the most reliable vision path, since
+/// it bypasses the engine's `@`-mention→read resolution. Images we can't send
+/// natively (unsupported type, or unreadable) degrade to a `@<path>` text block
+/// so the engine still gets them via the existing mention behavior. A text block
+/// is omitted when the body is empty (image-only turns are valid); the array is
+/// never left empty.
+fn format_user_message(text: &str, images: &[String]) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use serde_json::{json, Value};
+
+    let mut content: Vec<Value> = Vec::new();
+    if !text.is_empty() {
+        content.push(json!({"type": "text", "text": text}));
+    }
+    for path in images {
+        match media_type_for_ext(&ext_of(path)) {
+            Some(media_type) => match std::fs::read(path) {
+                Ok(bytes) => {
+                    let data = STANDARD.encode(&bytes);
+                    content.push(json!({
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": media_type, "data": data}
+                    }));
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[persistent] failed to read image {path}: {e}; sending as @mention"
+                    );
+                    content.push(json!({"type": "text", "text": format!("@{path}")}));
+                }
+            },
+            None => {
+                // Unsupported native-image type — keep the current @mention behavior.
+                content.push(json!({"type": "text", "text": format!("@{path}")}));
+            }
+        }
+    }
+    if content.is_empty() {
+        content.push(json!({"type": "text", "text": ""}));
+    }
+    json!({"type": "user", "message": {"role": "user", "content": content}}).to_string()
 }
 
 /// Format a permission response for `--input-format stream-json`.
@@ -76,7 +131,9 @@ fn format_permission_response(allow: bool, message: Option<&str>) -> String {
                 .replace('\\', "\\\\")
                 .replace('"', "\\\"")
                 .replace('\n', "\\n");
-            format!(r#"{{"type":"permission_response","behavior":"{behavior}","message":"{escaped}"}}"#)
+            format!(
+                r#"{{"type":"permission_response","behavior":"{behavior}","message":"{escaped}"}}"#
+            )
         }
         None => format!(r#"{{"type":"permission_response","behavior":"{behavior}"}}"#),
     }
@@ -94,7 +151,8 @@ impl PersistentSession {
         cwd: Option<&str>,
         model_override: Option<&str>,
     ) -> Result<Self> {
-        let (binary, args, env) = build_persistent_command(engine_id, session_id, resume, model_override).await?;
+        let (binary, args, env) =
+            build_persistent_command(engine_id, session_id, resume, model_override).await?;
 
         let mut cmd = Command::new(&binary);
         cmd.args(&args)
@@ -131,9 +189,11 @@ impl PersistentSession {
         })
     }
 
-    /// Write a user message to the process stdin.
-    pub async fn send_message(&mut self, message: &str) -> Result<()> {
-        let jsonl = format_user_message(message);
+    /// Write a user message (plus any image attachments) to the process stdin.
+    /// `images` are absolute paths embedded as native image content blocks when
+    /// supported (see `format_user_message`).
+    pub async fn send_message(&mut self, message: &str, images: &[String]) -> Result<()> {
+        let jsonl = format_user_message(message, images);
         self.stdin
             .write_all(jsonl.as_bytes())
             .await
@@ -245,7 +305,11 @@ async fn build_persistent_command(
     session_id: &str,
     resume: bool,
     model_override: Option<&str>,
-) -> Result<(std::path::PathBuf, Vec<String>, std::collections::HashMap<String, String>)> {
+) -> Result<(
+    std::path::PathBuf,
+    Vec<String>,
+    std::collections::HashMap<String, String>,
+)> {
     match engine_id {
         "claude" => {
             let binary = super::claude::find_claude_binary()?;
@@ -292,17 +356,18 @@ async fn build_persistent_command(
             }
             args.push(session_id.into());
             // Per-conversation model override takes precedence over CODEBUDDY_MODEL env var.
-            let model = model_override.filter(|s| !s.is_empty())
-                .or_else(|| env.get("CODEBUDDY_MODEL").filter(|s| !s.is_empty()).map(String::as_str));
+            let model = model_override.filter(|s| !s.is_empty()).or_else(|| {
+                env.get("CODEBUDDY_MODEL")
+                    .filter(|s| !s.is_empty())
+                    .map(String::as_str)
+            });
             if let Some(model) = model {
                 args.push("--model".into());
                 args.push(model.to_string());
             }
             Ok((binary, args, env))
         }
-        other => anyhow::bail!(
-            "persistent sessions not supported for engine: {other}"
-        ),
+        other => anyhow::bail!("persistent sessions not supported for engine: {other}"),
     }
 }
 

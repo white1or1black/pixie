@@ -1,4 +1,4 @@
-use super::{EngineStatus, NormalizedEvent, ToolEvent, ToolEventKind, UsageInfo, shared};
+use super::{shared, EngineStatus, NormalizedEvent, ToolEvent, ToolEventKind, UsageInfo};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -153,8 +153,7 @@ async fn spawn_with_args(args: Vec<String>, message: &str, cwd: Option<&str>) ->
     // shared::detach_from_controlling_terminal.
     shared::detach_from_controlling_terminal(&mut cmd);
 
-    cmd.spawn()
-        .context("failed to spawn cursor-agent process")
+    cmd.spawn().context("failed to spawn cursor-agent process")
 }
 
 const STREAM_ARGS: &[&str] = &[
@@ -176,7 +175,8 @@ fn stream_args_with_model(model: Option<&str>) -> Vec<String> {
 
 async fn stream_args_from_env(model_override: Option<&str>) -> Vec<String> {
     let env = collect_env().await;
-    let model = model_override.filter(|s| !s.is_empty())
+    let model = model_override
+        .filter(|s| !s.is_empty())
         .or_else(|| env.get("CURSOR_MODEL").map(String::as_str));
     stream_args_with_model(model)
 }

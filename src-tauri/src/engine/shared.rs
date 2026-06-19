@@ -83,7 +83,12 @@ pub fn candidate_paths() -> Vec<PathBuf> {
         }
     }
 
-    for p in &["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/snap/bin"] {
+    for p in &[
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+        "/usr/bin",
+        "/snap/bin",
+    ] {
         paths.push(PathBuf::from(p));
     }
 
@@ -125,11 +130,7 @@ pub fn find_binary(names: &[&str], tool_label: &str) -> anyhow::Result<PathBuf> 
 
 pub fn extend_path(env: &mut HashMap<String, String>) {
     if let Some(path) = env.get_mut("PATH") {
-        let extras = [
-            "/usr/local/bin",
-            "/opt/homebrew/bin",
-            "/opt/homebrew/sbin",
-        ];
+        let extras = ["/usr/local/bin", "/opt/homebrew/bin", "/opt/homebrew/sbin"];
         let existing: Vec<&str> = path.split(':').collect();
         let missing: Vec<&str> = extras
             .iter()
@@ -244,9 +245,7 @@ pub fn u64_field(obj: &serde_json::Value, key: &str) -> u64 {
 
 pub fn extract_result_text(value: Option<&serde_json::Value>) -> Option<String> {
     match value {
-        Some(serde_json::Value::String(s)) => {
-            Some(truncate_text(s, MAX_TOOL_RESULT_CHARS))
-        }
+        Some(serde_json::Value::String(s)) => Some(truncate_text(s, MAX_TOOL_RESULT_CHARS)),
         Some(serde_json::Value::Array(arr)) => {
             let mut buf = String::new();
             for block in arr {

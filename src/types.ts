@@ -25,6 +25,9 @@ export interface Message {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
+  /** Absolute paths of image attachments sent with this user message. Rendered
+   *  as thumbnails in the bubble; sent to the engine as image content blocks. */
+  images?: string[];
   timestamp: number;
   status?: "sending" | "streaming" | "done" | "error";
   tools?: ToolStep[];

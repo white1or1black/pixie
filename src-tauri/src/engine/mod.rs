@@ -1,8 +1,8 @@
 pub mod claude;
 pub mod codebuddy;
 pub mod cursor;
-mod shared;
 pub mod persistent;
+mod shared;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -289,11 +289,7 @@ impl AgentProcess {
     }
 
     #[allow(dead_code)]
-    pub async fn read_stream<F>(
-        &mut self,
-        engine_id: &str,
-        on_events: F,
-    ) -> Result<String>
+    pub async fn read_stream<F>(&mut self, engine_id: &str, on_events: F) -> Result<String>
     where
         F: FnMut(&[NormalizedEvent]),
     {
@@ -393,13 +389,14 @@ pub async fn remember_session_id(
         return;
     }
     let mut guard = map.lock().await;
-    let entry = guard
-        .entry(conversation_id.to_string())
-        .or_insert_with(|| ConversationEngineState {
-            engine_id: engine_id.to_string(),
-            external_session_id: None,
-            model: None,
-        });
+    let entry =
+        guard
+            .entry(conversation_id.to_string())
+            .or_insert_with(|| ConversationEngineState {
+                engine_id: engine_id.to_string(),
+                external_session_id: None,
+                model: None,
+            });
     entry.engine_id = engine_id.to_string();
     entry.external_session_id = Some(session_id.to_string());
 }

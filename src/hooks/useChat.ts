@@ -43,8 +43,8 @@ function generateId(): string {
 
 function generateTitle(content: string): string {
   const trimmed = content.trim().replace(/\n/g, " ");
-  if (trimmed.length <= 60) return trimmed;
-  return trimmed.slice(0, 57) + "...";
+  if (trimmed.length <= 30) return trimmed;
+  return trimmed.slice(0, 27) + "...";
 }
 
 function findWorkspaceForConversation(
@@ -205,7 +205,7 @@ function applyStreamBatch(
 
     msgs[msgs.length - 1] = updated;
     return { ...conv, messages: msgs, updatedAt: Date.now() };
-  });
+  }, indexRef);
 }
 
 function emptyStreamBatch(): StreamBatch {
@@ -798,8 +798,8 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
   }, [activeId]);
 
   const sendMessage = useCallback(
-    async (content: string, convIdOverride?: string) => {
-      if (!content.trim()) return;
+    async (content: string, convIdOverride?: string, images?: string[]) => {
+      if (!content.trim() && !(images && images.length > 0)) return;
 
       let convId = convIdOverride ?? activeId;
       let wsId = convId
@@ -832,6 +832,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
       const userMsg: Message = {
         id: generateId(), role: "user", content,
         timestamp: Date.now(), status: "done",
+        images: images && images.length > 0 ? images : undefined,
       };
       const assistantMsg: Message = {
         id: generateId(), role: "assistant", content: "",
@@ -876,6 +877,8 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
           engine,
           isContinue,
           model: convModel,
+          // Omit when empty so the backend's Option<Vec> deserializes to None.
+          ...(images && images.length > 0 ? { images } : {}),
         });
       } catch (e) {
         setError(String(e));

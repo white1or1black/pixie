@@ -1,13 +1,14 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import SkillsDropdown from "./SkillsDropdown";
 import type { SkillEntry, AgentEngineId, EngineModelConfigs, ModelEntry } from "../types";
 import { ENGINE_MODEL_ENV_KEY } from "../types";
+import { getExtension, IMAGE_EXTENSIONS } from "../preview";
 
 interface InputBarProps {
-  onSend: (message: string) => void;
+  onSend: (message: string, images?: string[]) => void;
   onStop: () => void;
   isGenerating: boolean;
   disabled?: boolean;
@@ -49,6 +50,37 @@ function toWorkspaceRelative(absPath: string, workspace?: string | null): string
   if (abs === base) return ".";
   if (abs.startsWith(base + "/")) return abs.slice(base.length + 1);
   return absPath;
+}
+
+/** Map an image MIME type to a file extension for the saved paste file. */
+function mimeToExt(mime: string): string {
+  const sub = mime.split("/")[1] ?? "";
+  if (sub === "jpeg") return "jpg";
+  return sub || "png";
+}
+
+/** Whether a staged attachment points at an image — previewable inline and
+ *  eligible for a native image content block. Shares `IMAGE_EXTENSIONS` with the
+ *  right-side preview panel so "image" means the same thing app-wide. */
+const isImagePath = (path: string) => IMAGE_EXTENSIONS.has(getExtension(basename(path)));
+
+/** Read a Blob as a bare base64 string (the data: URL prefix is stripped) so it
+ *  can be sent compactly over IPC and decoded back to bytes by the backend. */
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result !== "string") {
+        reject(new Error("Failed to read image"));
+        return;
+      }
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("FileReader error"));
+    reader.readAsDataURL(blob);
+  });
 }
 
 export default function InputBar({
@@ -156,9 +188,12 @@ export default function InputBar({
     const trimmed = value.trim();
     if (isGenerating || disabled) return;
     if (!trimmed && attachments.length === 0) return;
-    // Compose @mentions for each staged file, relative to the workspace when
-    // possible so they read cleanly and resolve against Claude's CWD.
+    // Image attachments are handed to the backend as paths (`images`): Claude/
+    // CodeBuddy embed them as native image content blocks, Cursor as @mentions.
+    // Other files still become @mentions relative to the workspace.
+    const imagePaths = attachments.filter(isImagePath);
     const mentions = attachments
+      .filter((p) => !isImagePath(p))
       .map((p) => "@" + toWorkspaceRelative(p, workspacePath))
       .join("\n");
     const finalMessage = trimmed
@@ -166,7 +201,7 @@ export default function InputBar({
         ? `${trimmed}\n\n${mentions}`
         : trimmed
       : mentions;
-    onSend(finalMessage);
+    onSend(finalMessage, imagePaths.length > 0 ? imagePaths : undefined);
     onChange("");
     setAttachments([]);
   }, [value, attachments, isGenerating, disabled, onSend, onChange, workspacePath]);
@@ -197,6 +232,42 @@ export default function InputBar({
       /* ignore picker errors / cancellations */
     }
   }, [disabled, isGenerating, addAttachments]);
+
+  // Paste a screenshot / copied image. The clipboard image Blob is base64-encoded
+  // and written to disk by the backend; the returned path is staged as an
+  // attachment, so it ships to the agent as an absolute @mention just like a
+  // dragged-in file. Honors the same accept gate as drag-and-drop.
+  const handlePaste = useCallback(
+    async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      if (!acceptInputRef.current) return;
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      // Array.from: DataTransferItemList is not iterable (no Symbol.iterator)
+      // on some webviews (e.g. macOS WebKit).
+      let sawImage = false;
+      for (const item of Array.from(items)) {
+        if (item.kind === "file" && item.type.startsWith("image/")) {
+          const file = item.getAsFile();
+          if (!file) continue;
+          sawImage = true;
+          try {
+            const base64 = await blobToBase64(file);
+            const path = await invoke<string>("save_pasted_image", {
+              data: base64,
+              ext: mimeToExt(item.type),
+            });
+            addAttachments([path]);
+          } catch {
+            /* ignore decode/write failures — paste silently no-ops */
+          }
+        }
+      }
+      // Swallow the default paste ONLY when there was an image, so plain text
+      // pastes still land in the textarea and raw image bytes never leak in.
+      if (sawImage) e.preventDefault();
+    },
+    [addAttachments]
+  );
 
   // Close the skills dropdown when clicking outside of it.
   useEffect(() => {
@@ -293,26 +364,39 @@ export default function InputBar({
           <div className="flex flex-wrap gap-1.5 mb-2 px-1">
             {attachments.map((path) => {
               const rel = toWorkspaceRelative(path, workspacePath);
+              const isImg = isImagePath(path);
               return (
                 <span
                   key={path}
                   className="inline-flex items-center gap-1 max-w-[240px] pl-2 pr-1 py-1 rounded-lg bg-[var(--bg-tertiary)] border border-[var(--border-color)] text-xs text-[var(--text-primary)]"
                   title={rel}
                 >
-                  <svg
-                    width="13"
-                    height="13"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    className="shrink-0 opacity-70"
-                  >
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                    <polyline points="14 2 14 8 20 8" />
-                  </svg>
+                  {isImg ? (
+                    // convertFileSrc routes through the Tauri asset protocol
+                    // (enabled in tauri.conf.json) — a raw file:// <img> is
+                    // blocked by the webview as cross-origin, which is why the
+                    // thumbnail was blank before.
+                    <img
+                      src={convertFileSrc(path)}
+                      alt={basename(path)}
+                      className="shrink-0 w-6 h-6 rounded object-cover border border-[var(--border-color)]"
+                    />
+                  ) : (
+                    <svg
+                      width="13"
+                      height="13"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      className="shrink-0 opacity-70"
+                    >
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                      <polyline points="14 2 14 8 20 8" />
+                    </svg>
+                  )}
                   <span className="truncate">{basename(path)}</span>
                   <button
                     type="button"
@@ -342,6 +426,7 @@ export default function InputBar({
             value={value}
             onChange={(e) => onChange(e.target.value)}
             onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
             placeholder={
               disabled
                 ? (disabledHint ?? "Type a message… (add a workspace to send)")
@@ -454,7 +539,7 @@ export default function InputBar({
                       !model ? "text-[var(--accent)] font-medium" : "text-[var(--text-primary)]"
                     }`}
                   >
-                    Default{engineModelConfigs[engine]?.[ENGINE_MODEL_ENV_KEY[engine]] ? ` (${engineModelConfigs[engine][ENGINE_MODEL_ENV_KEY[engine]]})` : ""}
+                    Default{(() => { const v = (engineModelConfigs[engine] as Record<string, string | undefined>)?.[ENGINE_MODEL_ENV_KEY[engine]]; return v ? ` (${v})` : ""; })()}
                   </button>
                   {availableModels.map((m) => (
                     <button

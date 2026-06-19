@@ -1,6 +1,4 @@
-use super::{
-    EngineStatus, NormalizedEvent, ToolEvent, ToolEventKind, UsageInfo, shared,
-};
+use super::{shared, EngineStatus, NormalizedEvent, ToolEvent, ToolEventKind, UsageInfo};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -47,9 +45,15 @@ pub async fn list_models() -> Vec<(String, String)> {
         ("sonnet".to_string(), "Sonnet (latest)".to_string()),
         ("opus".to_string(), "Opus (latest)".to_string()),
         ("haiku".to_string(), "Haiku (latest)".to_string()),
-        ("claude-sonnet-4-20250514".to_string(), "Sonnet 4".to_string()),
+        (
+            "claude-sonnet-4-20250514".to_string(),
+            "Sonnet 4".to_string(),
+        ),
         ("claude-opus-4-20250514".to_string(), "Opus 4".to_string()),
-        ("claude-haiku-3-5-20241022".to_string(), "Haiku 3.5".to_string()),
+        (
+            "claude-haiku-3-5-20241022".to_string(),
+            "Haiku 3.5".to_string(),
+        ),
     ];
     // Also include any models set in env vars that aren't already in the list.
     let env = collect_env().await;
@@ -59,7 +63,8 @@ pub async fn list_models() -> Vec<(String, String)> {
         "ANTHROPIC_DEFAULT_SONNET_MODEL",
         "ANTHROPIC_DEFAULT_HAIKU_MODEL",
     ];
-    let existing_ids: std::collections::HashSet<String> = models.iter().map(|(id, _)| id.clone()).collect();
+    let existing_ids: std::collections::HashSet<String> =
+        models.iter().map(|(id, _)| id.clone()).collect();
     for key in &env_model_keys {
         if let Some(val) = env.get(*key) {
             let val = val.trim().to_string();
@@ -125,7 +130,12 @@ pub async fn run_claude_command(args: Vec<String>) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-async fn spawn_with_args(args: Vec<String>, message: &str, cwd: Option<&str>, model_override: Option<&str>) -> Result<Child> {
+async fn spawn_with_args(
+    args: Vec<String>,
+    message: &str,
+    cwd: Option<&str>,
+    model_override: Option<&str>,
+) -> Result<Child> {
     let binary = find_claude_binary()?;
     let mut env = collect_env().await;
 
@@ -241,10 +251,7 @@ enum ClaudeStreamEvent {
     MessageStart {},
 
     #[serde(rename = "content_block_delta")]
-    ContentBlockDelta {
-        index: Option<usize>,
-        delta: Delta,
-    },
+    ContentBlockDelta { index: Option<usize>, delta: Delta },
 
     #[serde(rename = "content_block_start")]
     ContentBlockStart {
@@ -374,7 +381,9 @@ impl ClaudeStreamEvent {
     fn streaming_text(&self) -> Option<String> {
         match self {
             ClaudeStreamEvent::ContentBlockDelta { delta, .. } => delta.text.clone(),
-            ClaudeStreamEvent::ContentBlockStart { content_block, .. } => content_block.text.clone(),
+            ClaudeStreamEvent::ContentBlockStart { content_block, .. } => {
+                content_block.text.clone()
+            }
             ClaudeStreamEvent::Assistant { message } => message.as_ref().and_then(|msg| {
                 msg.get("content")
                     .and_then(|c| c.as_array())
@@ -398,18 +407,20 @@ impl ClaudeStreamEvent {
     fn streaming_thinking(&self) -> Option<String> {
         match self {
             ClaudeStreamEvent::Assistant { message } => message.as_ref().and_then(|msg| {
-                msg.get("content").and_then(|c| c.as_array()).and_then(|arr| {
-                    arr.iter().find_map(|block| {
-                        if block.get("type").and_then(|t| t.as_str()) == Some("thinking") {
-                            block
-                                .get("thinking")
-                                .and_then(|t| t.as_str())
-                                .map(|s| s.to_string())
-                        } else {
-                            None
-                        }
+                msg.get("content")
+                    .and_then(|c| c.as_array())
+                    .and_then(|arr| {
+                        arr.iter().find_map(|block| {
+                            if block.get("type").and_then(|t| t.as_str()) == Some("thinking") {
+                                block
+                                    .get("thinking")
+                                    .and_then(|t| t.as_str())
+                                    .map(|s| s.to_string())
+                            } else {
+                                None
+                            }
+                        })
                     })
-                })
             }),
             _ => None,
         }
@@ -418,65 +429,59 @@ impl ClaudeStreamEvent {
     fn tool_events(&self) -> Vec<ToolEvent> {
         let mut out = Vec::new();
 
-        let starts_from_content =
-            |content: Option<&serde_json::Value>, out: &mut Vec<ToolEvent>| {
-                if let Some(arr) = content.and_then(|c| c.as_array()) {
-                    for block in arr {
-                        if block.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
-                            continue;
-                        }
-                        let id = block
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let name = block.get("name").and_then(|v| v.as_str()).map(String::from);
-                        let input = block.get("input").map(|v| v.to_string());
-                        out.push(ToolEvent {
-                            id,
-                            kind: ToolEventKind::Start { name, input },
-                        });
+        let starts_from_content = |content: Option<&serde_json::Value>,
+                                   out: &mut Vec<ToolEvent>| {
+            if let Some(arr) = content.and_then(|c| c.as_array()) {
+                for block in arr {
+                    if block.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
+                        continue;
                     }
+                    let id = block
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let name = block.get("name").and_then(|v| v.as_str()).map(String::from);
+                    let input = block.get("input").map(|v| v.to_string());
+                    out.push(ToolEvent {
+                        id,
+                        kind: ToolEventKind::Start { name, input },
+                    });
                 }
-            };
+            }
+        };
 
-        let results_from_content =
-            |content: Option<&serde_json::Value>, out: &mut Vec<ToolEvent>| {
-                if let Some(arr) = content.and_then(|c| c.as_array()) {
-                    for block in arr {
-                        if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
-                            continue;
-                        }
-                        let id = block
-                            .get("tool_use_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let content = shared::extract_result_text(block.get("content"));
-                        let is_error = block
-                            .get("is_error")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
-                        out.push(ToolEvent {
-                            id,
-                            kind: ToolEventKind::Result { content, is_error },
-                        });
+        let results_from_content = |content: Option<&serde_json::Value>,
+                                    out: &mut Vec<ToolEvent>| {
+            if let Some(arr) = content.and_then(|c| c.as_array()) {
+                for block in arr {
+                    if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+                        continue;
                     }
+                    let id = block
+                        .get("tool_use_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let content = shared::extract_result_text(block.get("content"));
+                    let is_error = block
+                        .get("is_error")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    out.push(ToolEvent {
+                        id,
+                        kind: ToolEventKind::Result { content, is_error },
+                    });
                 }
-            };
+            }
+        };
 
         match self {
             ClaudeStreamEvent::Assistant { message } => {
-                starts_from_content(
-                    message.as_ref().and_then(|m| m.get("content")),
-                    &mut out,
-                );
+                starts_from_content(message.as_ref().and_then(|m| m.get("content")), &mut out);
             }
             ClaudeStreamEvent::User { message } => {
-                results_from_content(
-                    message.as_ref().and_then(|m| m.get("content")),
-                    &mut out,
-                );
+                results_from_content(message.as_ref().and_then(|m| m.get("content")), &mut out);
             }
             ClaudeStreamEvent::ToolUse { id, name, input } => {
                 out.push(ToolEvent {
@@ -676,7 +681,12 @@ pub fn parse_line(line: &str) -> Vec<NormalizedEvent> {
     }
 
     // Permission request: the agent wants to run a tool and needs user approval.
-    if let ClaudeStreamEvent::PermissionRequest { id, tool_name, input } = &evt {
+    if let ClaudeStreamEvent::PermissionRequest {
+        id,
+        tool_name,
+        input,
+    } = &evt
+    {
         out.push(NormalizedEvent::PermissionRequest {
             id: id.clone().unwrap_or_default(),
             tool_name: tool_name.clone().unwrap_or_default(),

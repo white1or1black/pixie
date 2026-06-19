@@ -335,7 +335,7 @@ function AppShell() {
           <>
             {/* Header — drag empty areas to move window */}
             <header
-              className={`shrink-0 flex items-center justify-between px-4 py-3 border-b border-[var(--border-color)] bg-[var(--bg-primary)] ${navigator.platform?.includes("Mac") && !sidebarOpen ? "pl-20" : ""}`}
+              className={`relative shrink-0 flex items-center px-4 py-3 border-b border-[var(--border-color)] bg-[var(--bg-primary)] ${navigator.platform?.includes("Mac") && !sidebarOpen ? "pl-20" : ""}`}
               onMouseDown={handleDragRegion}
             >
               <div className="flex items-center gap-3">
@@ -363,7 +363,7 @@ function AppShell() {
                     <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
                   </svg>
                 </button>
-                <div className="min-w-0">
+                <div className="min-w-0 pr-10">
                   {headerEditing ? (
                     <input
                       ref={headerEditRef}
@@ -409,24 +409,22 @@ function AppShell() {
                   )}
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => setFileExplorerOpen((prev) => !prev)}
-                  disabled={!activeWorkspace}
-                  className={`p-1.5 rounded-lg transition-colors ${
-                    fileExplorerOpen
-                      ? "bg-[var(--bg-tertiary)] text-[var(--accent)]"
-                      : "hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
-                  } disabled:opacity-30 disabled:cursor-not-allowed`}
-                  title={activeWorkspace ? "Toggle preview panel" : "Add a workspace first"}
-                >
-                  {/* Right side-panel toggle */}
-                  <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-                    <rect x="3" y="4" width="14" height="12" rx="2" stroke="currentColor" strokeWidth="1.5" />
-                    <line x1="13" y1="4" x2="13" y2="16" stroke="currentColor" strokeWidth="1.5" />
-                  </svg>
-                </button>
-              </div>
+              <button
+                onClick={() => setFileExplorerOpen((prev) => !prev)}
+                disabled={!activeWorkspace}
+                className={`absolute right-4 top-1/2 -translate-y-1/2 z-10 p-1.5 rounded-lg bg-[var(--bg-primary)] transition-colors ${
+                  fileExplorerOpen
+                    ? "text-[var(--accent)] hover:bg-[var(--bg-tertiary)]"
+                    : "text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]"
+                } disabled:opacity-30 disabled:cursor-not-allowed`}
+                title={activeWorkspace ? "Toggle preview panel" : "Add a workspace first"}
+              >
+                {/* Right side-panel toggle */}
+                <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                  <rect x="3" y="4" width="14" height="12" rx="2" stroke="currentColor" strokeWidth="1.5" />
+                  <line x1="13" y1="4" x2="13" y2="16" stroke="currentColor" strokeWidth="1.5" />
+                </svg>
+              </button>
             </header>
 
             {error && (
@@ -441,7 +439,7 @@ function AppShell() {
             </Suspense>
 
             <InputBar
-              onSend={sendMessage}
+              onSend={(msg, images) => sendMessage(msg, undefined, images)}
               onStop={() => stopGeneration()}
               isGenerating={isGenerating}
               disabled={!activeWorkspace}
