@@ -75,47 +75,76 @@ fn apply_engine_model_config_overrides(engine: &str, env: &mut HashMap<String, S
     }
 }
 
+/// User home directory: `$HOME` on Unix, `%USERPROFILE%` on Windows.
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
 pub fn candidate_paths() -> Vec<PathBuf> {
     let mut paths = vec![];
 
+    // OS-correct PATH splitting (`;` on Windows, `:` on Unix) via split_paths.
+    // The old `split(':')` mangled Windows PATH because drive letters (`D:\`)
+    // contain ':', so non-C-drive installs were never searched.
     if let Ok(path_var) = std::env::var("PATH") {
-        for dir in path_var.split(':') {
-            paths.push(PathBuf::from(dir));
+        for dir in std::env::split_paths(&path_var) {
+            paths.push(dir);
         }
     }
 
-    for p in &[
-        "/usr/local/bin",
-        "/opt/homebrew/bin",
-        "/usr/bin",
-        "/snap/bin",
-    ] {
-        paths.push(PathBuf::from(p));
-    }
-
-    if let Ok(home) = std::env::var("HOME") {
-        let home = PathBuf::from(home);
-        let nvm_dir = home.join(".nvm/versions/node");
-        if nvm_dir.exists() {
-            if let Ok(entries) = std::fs::read_dir(&nvm_dir) {
-                for entry in entries.flatten() {
-                    paths.push(entry.path().join("bin"));
+    if cfg!(windows) {
+        // npm global bin (where `claude.cmd` / `cursor-agent.cmd` land) + common
+        // user-local spots.
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            paths.push(PathBuf::from(&appdata).join("npm"));
+        }
+        if let Some(home) = home_dir() {
+            paths.push(home.join(".local").join("bin"));
+            paths.push(home.join(".cursor").join("bin"));
+        }
+    } else {
+        for p in &[
+            "/usr/local/bin",
+            "/opt/homebrew/bin",
+            "/usr/bin",
+            "/snap/bin",
+        ] {
+            paths.push(PathBuf::from(p));
+        }
+        if let Some(home) = home_dir() {
+            let nvm_dir = home.join(".nvm/versions/node");
+            if nvm_dir.exists() {
+                if let Ok(entries) = std::fs::read_dir(&nvm_dir) {
+                    for entry in entries.flatten() {
+                        paths.push(entry.path().join("bin"));
+                    }
                 }
             }
+            paths.push(home.join(".local/bin"));
+            paths.push(home.join(".cursor/bin"));
         }
-        paths.push(home.join(".local/bin"));
-        paths.push(home.join(".cursor/bin"));
     }
 
     paths
 }
 
 pub fn find_binary(names: &[&str], tool_label: &str) -> anyhow::Result<PathBuf> {
+    // On Windows, match PATHEXT: npm global bins are `claude.cmd` shims (or
+    // `claude.exe` for native installs), not bare `claude`. On Unix, no ext.
+    let exts: &[&str] = if cfg!(windows) {
+        &["", ".exe", ".cmd", ".bat"]
+    } else {
+        &[""]
+    };
     for dir in candidate_paths() {
         for name in names {
-            let candidate = dir.join(name);
-            if candidate.exists() && candidate.is_file() {
-                return Ok(candidate);
+            for ext in exts {
+                let candidate = dir.join(format!("{name}{ext}"));
+                if candidate.is_file() {
+                    return Ok(candidate);
+                }
             }
         }
     }
@@ -129,7 +158,31 @@ pub fn find_binary(names: &[&str], tool_label: &str) -> anyhow::Result<PathBuf> 
     )
 }
 
+/// Build a `Command` for an engine binary. On Windows, `.cmd`/`.bat` shims (npm
+/// global bins like `claude.cmd`) can't be executed directly by `CreateProcess`
+/// — they must run via `cmd.exe /c`. Real `.exe` binaries (and everything on
+/// Unix) run directly. Callers still append args/stdio/env as usual.
+pub fn engine_command(binary: &Path) -> tokio::process::Command {
+    let needs_shell = cfg!(windows)
+        && matches!(
+            binary.extension().and_then(|e| e.to_str()),
+            Some("cmd" | "bat")
+        );
+    if needs_shell {
+        let mut c = tokio::process::Command::new("cmd.exe");
+        c.arg("/c").arg(binary);
+        c
+    } else {
+        tokio::process::Command::new(binary)
+    }
+}
+
 pub fn extend_path(env: &mut HashMap<String, String>) {
+    // These extras are Unix-only paths; on Windows PATH uses ';' as separator
+    // and these dirs don't exist, so leave PATH alone there.
+    if cfg!(windows) {
+        return;
+    }
     if let Some(path) = env.get_mut("PATH") {
         let extras = ["/usr/local/bin", "/opt/homebrew/bin", "/opt/homebrew/sbin"];
         let existing: Vec<&str> = path.split(':').collect();
@@ -210,7 +263,7 @@ pub async fn run_with_env(
     args: &[&str],
     env: &HashMap<String, String>,
 ) -> anyhow::Result<std::process::Output> {
-    let mut cmd = tokio::process::Command::new(binary);
+    let mut cmd = engine_command(binary);
     cmd.args(args);
     for (k, v) in env {
         cmd.env(k, v);
@@ -231,7 +284,7 @@ pub async fn spawn_probe_child(
     cwd: Option<&str>,
     env: &HashMap<String, String>,
 ) -> anyhow::Result<tokio::process::Child> {
-    let mut cmd = tokio::process::Command::new(&binary);
+    let mut cmd = engine_command(&binary);
     cmd.args(args)
         .arg(message)
         .stdin(Stdio::null())
@@ -257,7 +310,7 @@ pub async fn spawn_detached(
     args: &[String],
     env: &HashMap<String, String>,
 ) -> anyhow::Result<()> {
-    let mut cmd = tokio::process::Command::new(&binary);
+    let mut cmd = engine_command(&binary);
     cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

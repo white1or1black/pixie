@@ -481,6 +481,73 @@ pub async fn login(id: &str) -> Result<()> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// One-click install
+// ---------------------------------------------------------------------------
+
+/// The shell command that installs an engine CLI globally. Run via `sh -c` so
+/// the cursor pipe (`curl ... | bash`) works. These mirror the commands shown
+/// in the setup UI.
+pub fn install_command(id: &str) -> Result<&'static str> {
+    Ok(match id {
+        "claude" => "npm install -g @anthropic-ai/claude-code",
+        "codebuddy" => "npm install -g @tencent-ai/codebuddy-code",
+        "cursor" => "curl https://cursor.com/install -fsS | bash",
+        other => anyhow::bail!("unknown engine: {other}"),
+    })
+}
+
+/// Result of a one-click install: whether the command exited 0, plus its
+/// combined stdout/stderr (surfaced to the user on failure so they can debug —
+/// e.g. missing npm/node, or a permissions error).
+#[derive(Debug, Clone, Serialize)]
+pub struct InstallOutcome {
+    pub success: bool,
+    pub output: String,
+}
+
+/// Run an engine's install command in the user's home dir, with the login-shell
+/// environment (so npm/node on PATH — including nvm/homebrew — are found).
+pub async fn install(id: &str) -> Result<InstallOutcome> {
+    let cmd = install_command(id)?;
+    let env = shared::get_shell_env().await.clone();
+    let home = shared::home_dir();
+
+    // `sh -c` on Unix (handles the cursor `curl … | bash` pipe), `cmd /C` on
+    // Windows (where there's no sh and npm is `npm.cmd`). Note the cursor
+    // install command is Unix-only (needs bash); on Windows it will fail and
+    // surface that to the user.
+    let mut c = if cfg!(windows) {
+        let mut c = tokio::process::Command::new("cmd.exe");
+        c.arg("/C").arg(cmd);
+        c
+    } else {
+        let mut c = tokio::process::Command::new("sh");
+        c.arg("-c").arg(cmd);
+        c
+    };
+    if let Some(home) = &home {
+        c.current_dir(home);
+    }
+    for (k, v) in &env {
+        c.env(k, v);
+    }
+    log::info!("[install] {id}: running `{cmd}` in {:?}", home);
+    let output = c.output().await.context("failed to run install command")?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let combined = if stdout.trim().is_empty() {
+        stderr
+    } else if stderr.trim().is_empty() {
+        stdout
+    } else {
+        format!("{stdout}\n{stderr}")
+    };
+    let success = output.status.success();
+    log::info!("[install] {id}: success={success}, {} output bytes", combined.len());
+    Ok(InstallOutcome { success, output: combined })
+}
+
 /// Fetch available models for a given engine.
 /// Returns a list of (model_id, display_label) pairs.
 pub async fn list_models(engine_id: &str) -> Vec<(String, String)> {

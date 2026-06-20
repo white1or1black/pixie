@@ -116,12 +116,14 @@ function EngineCard({
   status,
   onProbe,
   onLogin,
+  onInstall,
 }: {
   engineId: AgentEngineId;
   label: string;
   status: EngineStatus | undefined;
   onProbe: (id: AgentEngineId) => void;
   onLogin: (id: AgentEngineId) => void;
+  onInstall: (id: AgentEngineId) => Promise<{ success: boolean; output: string }>;
 }) {
   const info = ENGINE_SETUP_INFO[engineId];
   const installed = !!status?.available;
@@ -129,6 +131,21 @@ function EngineCard({
   const ready = installed && authState === "ready";
   const notReady = installed && !ready;
   const probing = installed && authState === "unknown";
+  const [installing, setInstalling] = useState(false);
+  const [installError, setInstallError] = useState<string | null>(null);
+
+  const handleInstall = async () => {
+    setInstalling(true);
+    setInstallError(null);
+    try {
+      const res = await onInstall(engineId);
+      if (!res.success) setInstallError(res.output || "安装失败，请用下方命令手动安装");
+    } catch (e) {
+      setInstallError(String(e));
+    } finally {
+      setInstalling(false);
+    }
+  };
 
   return (
     <div className="border border-[var(--border-color)] rounded-xl p-4 bg-[var(--bg-primary)]">
@@ -158,8 +175,29 @@ function EngineCard({
 
       {!installed && (
         <div className="space-y-2">
-          <p className="text-xs text-[var(--text-secondary)]">在终端运行安装命令：</p>
-          <CommandRow command={info.install} label="复制" />
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleInstall}
+              disabled={installing}
+              className="px-3 py-1.5 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-xs font-medium transition-colors disabled:opacity-50"
+            >
+              {installing ? "安装中…" : "一键安装"}
+            </button>
+            {installing && (
+              <div className="w-3.5 h-3.5 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin" />
+            )}
+          </div>
+          {installError && (
+            <p className="text-xs text-red-400 break-all whitespace-pre-wrap">{installError}</p>
+          )}
+          <details className="text-[11px] text-[var(--text-secondary)]">
+            <summary className="cursor-pointer hover:text-[var(--text-primary)]">
+              手动安装（复制命令到终端运行）
+            </summary>
+            <div className="mt-1">
+              <CommandRow command={info.install} label="复制" />
+            </div>
+          </details>
         </div>
       )}
 
@@ -219,11 +257,13 @@ function EngineSetup({
   statuses,
   onProbe,
   onLogin,
+  onInstall,
   onClose,
 }: {
   statuses: EngineStatus[];
   onProbe: (id: AgentEngineId) => void;
   onLogin: (id: AgentEngineId) => void;
+  onInstall: (id: AgentEngineId) => Promise<{ success: boolean; output: string }>;
   onClose: () => void;
 }) {
   const anyReady = statuses.some((s) => s.available && s.auth_state === "ready");
@@ -258,6 +298,7 @@ function EngineSetup({
               status={statuses.find((s) => s.id === e.id)}
               onProbe={onProbe}
               onLogin={onLogin}
+              onInstall={onInstall}
             />
           ))}
           <p className="text-[11px] text-[var(--text-secondary)] pt-1">
@@ -324,6 +365,7 @@ function AppShell() {
     readyEngineIds,
     probeEngineStatus,
     engineLogin,
+    installEngine,
     defaultEngine,
     setDefaultEngine,
     defaultWorkspacePath,
@@ -527,6 +569,7 @@ function AppShell() {
           statuses={engineStatuses}
           onProbe={probeEngineStatus}
           onLogin={engineLogin}
+          onInstall={installEngine}
           onClose={() => setSetupOpen(false)}
         />
       )}

@@ -1121,6 +1121,22 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
     }
   }, []);
 
+  /** One-click install: run the engine's install command, then (on success)
+   *  re-check the binary so the card flips to 已安装 and the probe effect picks
+   *  it up. Returns { success, output } so the caller can show errors. */
+  const installEngine = useCallback(
+    async (engineId: AgentEngineId): Promise<{ success: boolean; output: string }> => {
+      const res = await invoke<{ success: boolean; output: string }>("install_engine", {
+        engine: engineId,
+      });
+      if (res.success) {
+        await refreshEngineStatuses();
+      }
+      return res;
+    },
+    [refreshEngineStatuses],
+  );
+
   const anyEngineAvailable = (engineStatuses ?? []).some((s) => s.available);
 
   /** At least one engine is logged in and working (or was last session — see
@@ -1171,6 +1187,7 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
     refreshEngineStatuses,
     probeEngineStatus,
     engineLogin,
+    installEngine,
     anyEngineReady,
     readyEngineIds,
     clearError,

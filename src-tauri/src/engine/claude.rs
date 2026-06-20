@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 
 const CLAUDE_BINARY_NAMES: &[&str] = &["claude"];
 
@@ -146,7 +146,7 @@ pub async fn run_claude_command(args: Vec<String>) -> Result<String> {
     let binary = find_claude_binary()?;
     let env = collect_env().await;
 
-    let mut cmd = Command::new(&binary);
+    let mut cmd = shared::engine_command(&binary);
     cmd.args(&args);
     for (k, v) in &env {
         cmd.env(k, v);
@@ -175,7 +175,7 @@ async fn spawn_with_args(
         env.insert("ANTHROPIC_MODEL".to_string(), model.to_string());
     }
 
-    let mut cmd = Command::new(&binary);
+    let mut cmd = shared::engine_command(&binary);
     cmd.args(args)
         .arg(message)
         .stdin(Stdio::null())

@@ -1776,6 +1776,14 @@ async fn engine_login(engine: String) -> Result<(), String> {
     engine::login(&engine).await.map_err(|e| e.to_string())
 }
 
+/// One-click install: run the engine's install command (npm/curl) in the user's
+/// home dir with the login-shell env, and return success + combined output. The
+/// frontend re-checks the engine after a successful install.
+#[tauri::command]
+async fn install_engine(engine: String) -> Result<engine::InstallOutcome, String> {
+    engine::install(&engine).await.map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn list_models(engine: String) -> Result<Vec<serde_json::Value>, String> {
     log::info!("[list_models] called for engine={engine}");
@@ -2544,6 +2552,7 @@ pub fn run() {
             check_engine_available,
             probe_engine,
             engine_login,
+            install_engine,
             list_models,
             update_conversation_model,
             list_scheduled_tasks,

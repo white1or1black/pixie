@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 
 /// Binary names installed by `@tencent-ai/codebuddy-code`.
 const CODEBUDDY_BINARY_NAMES: &[&str] = &["codebuddy", "cbc"];
@@ -43,7 +43,7 @@ pub async fn list_models() -> Vec<(String, String)> {
         }
     };
     let env = collect_env().await;
-    let mut cmd = tokio::process::Command::new(&binary);
+    let mut cmd = shared::engine_command(&binary);
     cmd.arg("--help");
     for (k, v) in &env {
         cmd.env(k, v);
@@ -217,7 +217,7 @@ async fn spawn(
 ) -> Result<Child> {
     let binary = find_codebuddy_binary()?;
 
-    let mut cmd = Command::new(&binary);
+    let mut cmd = shared::engine_command(&binary);
     cmd.args(args)
         .arg(message)
         .stdin(Stdio::null())

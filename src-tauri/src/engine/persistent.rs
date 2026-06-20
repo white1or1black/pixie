@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::Mutex;
 
 use super::shared::{self, detach_from_controlling_terminal};
@@ -154,7 +154,7 @@ impl PersistentSession {
         let (binary, args, env) =
             build_persistent_command(engine_id, session_id, resume, model_override).await?;
 
-        let mut cmd = Command::new(&binary);
+        let mut cmd = shared::engine_command(&binary);
         cmd.args(&args)
             .stdin(std::process::Stdio::piped()) // stdin stays open
             .stdout(std::process::Stdio::piped())
