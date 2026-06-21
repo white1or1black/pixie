@@ -25,7 +25,8 @@ struct Document {
     meta_tf: HashMap<String, usize>,
 }
 
-/// In-memory search index.
+/// In-memory search index with inverted posting lists for O(k) search
+/// (k = number of docs containing at least one query term).
 #[derive(Debug, Clone, Default)]
 pub struct SearchIndex {
     docs: Vec<Document>,
@@ -33,6 +34,8 @@ pub struct SearchIndex {
     avg_dl: f64,
     /// Document frequency: how many docs contain each term.
     df: HashMap<String, usize>,
+    /// Inverted index: term → list of doc indices containing that term.
+    postings: HashMap<String, Vec<usize>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,18 +122,20 @@ impl SearchIndex {
             total_tokens as f64 / docs.len() as f64
         };
 
-        // Compute document frequency (combined body + meta).
+        // Compute document frequency + posting lists (combined body + meta).
         let mut df: HashMap<String, usize> = HashMap::new();
-        for doc in &docs {
+        let mut postings: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, doc) in docs.iter().enumerate() {
             let mut seen = std::collections::HashSet::new();
             for token in doc.body_tokens.iter().chain(doc.meta_tokens.iter()) {
                 if seen.insert(token.clone()) {
                     *df.entry(token.clone()).or_insert(0) += 1;
+                    postings.entry(token.clone()).or_default().push(i);
                 }
             }
         }
 
-        Ok(Self { docs, avg_dl, df })
+        Ok(Self { docs, avg_dl, df, postings })
     }
 
     /// Search the index with a query string, returning top `limit` results.
@@ -140,13 +145,26 @@ impl SearchIndex {
             return vec![];
         }
 
-        let doc_count = self.docs.len();
-        let mut scored: Vec<(usize, f64)> = Vec::new();
+        // Use posting lists to find candidate docs — only score docs that
+        // contain at least one query term (O(k) instead of O(n)).
+        let mut candidates: HashMap<usize, f64> = HashMap::new();
+        for qt in &query_terms {
+            if let Some(hits) = self.postings.get(qt) {
+                for &doc_idx in hits {
+                    // Accumulate per-term contribution to avoid double-counting
+                    // when the same doc matches multiple query terms.
+                    *candidates.entry(doc_idx).or_insert(0.0) += 1.0;
+                }
+            }
+        }
 
-        for (i, doc) in self.docs.iter().enumerate() {
+        let doc_count = self.docs.len();
+        let mut scored: Vec<(usize, f64)> = Vec::with_capacity(candidates.len());
+
+        for (&doc_idx, _) in &candidates {
+            let doc = &self.docs[doc_idx];
             let doc_len = doc.body_tokens.len();
 
-            // Score body with BM25 (weight 1.0).
             let body_score = bm25_score(
                 &doc.body_tf,
                 doc_len,
@@ -156,7 +174,6 @@ impl SearchIndex {
                 &query_terms,
             );
 
-            // Score meta with BM25 (weight 2.0 — title/tags matter more).
             let meta_len = doc.meta_tokens.len();
             let meta_avg_dl = if doc_count > 0 {
                 self.docs.iter().map(|d| d.meta_tokens.len()).sum::<usize>() as f64
@@ -175,7 +192,7 @@ impl SearchIndex {
 
             let combined = body_score + meta_score * 2.0;
             if combined > 0.0 {
-                scored.push((i, combined));
+                scored.push((doc_idx, combined));
             }
         }
 
