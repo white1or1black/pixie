@@ -15,6 +15,33 @@ interface MessageBubbleProps {
   conversationId?: string;
 }
 
+/** Render user message content, detecting and collapsing KB context blocks. */
+function UserContent({ content }: { content: string }) {
+  const detailsMatch = content.match(/^<details\b[\s\S]*?<\/details>\n*/);
+  if (detailsMatch) {
+    const ctxHtml = detailsMatch[0];
+    const rest = content.slice(detailsMatch[0].length);
+    return (
+      <div>
+        <div
+          className="text-sm leading-relaxed text-[var(--text-secondary)] mb-2"
+          dangerouslySetInnerHTML={{ __html: ctxHtml }}
+        />
+        {rest && (
+          <p className="whitespace-pre-wrap [overflow-wrap:anywhere] text-[var(--text-primary)] text-sm leading-relaxed m-0">
+            {rest}
+          </p>
+        )}
+      </div>
+    );
+  }
+  return (
+    <p className="whitespace-pre-wrap [overflow-wrap:anywhere] text-[var(--text-primary)] text-sm leading-relaxed m-0">
+      {content}
+    </p>
+  );
+}
+
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
 
@@ -768,9 +795,7 @@ function MessageBubbleImpl({ message, onOpenPreview, onRespondPermission, conver
               </div>
             )}
             {message.content && (
-              <p className="whitespace-pre-wrap [overflow-wrap:anywhere] text-[var(--text-primary)] text-sm leading-relaxed m-0">
-                {message.content}
-              </p>
+              <UserContent content={message.content} />
             )}
           </div>
         ) : (

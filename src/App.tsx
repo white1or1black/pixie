@@ -672,16 +672,17 @@ function AppShell() {
       .slice(0, 3)
       .map(
         (r, i) =>
-          `  ${i + 1}. **${r.title}** (${r.created?.split("T")[0] ?? "unknown date"})\n     ${r.snippet}`,
+          `<div class="kb-entry"><strong>${i + 1}. ${r.title}</strong> (${r.created?.split("T")[0] ?? "unknown date"})<br>${r.snippet}</div>`,
       )
-      .join("\n\n");
+      .join("\n");
     return `\
-<details>
+<details class="user-msg-details">
 <summary>Knowledge Base Context (${results.length} notes)</summary>
 
 ${entries}
 
-</details>`;
+</details>
+`;
   }
 
   // Show splash while loading
