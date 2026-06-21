@@ -831,11 +831,10 @@ ${entries}
                 className="shrink-0 ml-1 p-1.5 rounded-lg text-[var(--text-secondary)] hover:bg-[var(--text-secondary)]/10 hover:text-[var(--text-primary)] transition-colors"
                 title="Open knowledge base in Obsidian"
               >
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-                  <path d="M12 2L3 7.5v9L12 22l9-5.5v-9L12 2z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                  <path d="M12 2v20M3 7.5l9 5.5 9-5.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                  <path d="M12 7.5v7" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
-                  <path d="M12 2L3 7.5M21 7.5L12 2" stroke="currentColor" strokeWidth="0.5" strokeLinecap="round" />
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <ellipse cx="12" cy="6" rx="8" ry="3" />
+                  <path d="M4 6v6c0 1.5 3.5 3 8 3s8-1.5 8-3V6" />
+                  <path d="M4 12v6c0 1.5 3.5 3 8 3s8-1.5 8-3v-6" />
                 </svg>
               </button>
               <button
