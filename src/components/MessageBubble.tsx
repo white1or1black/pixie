@@ -1,6 +1,7 @@
 import { memo, useState, useCallback, useEffect, useRef, useMemo, type ReactNode, type ComponentPropsWithoutRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import rehypeRaw from "rehype-raw";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import type { Message, MessageUsage, PreviewRequest, ToolStep, PendingPermission } from "../types";
@@ -804,6 +805,7 @@ function MessageBubbleImpl({ message, onOpenPreview, onRespondPermission, conver
             ) : (
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
+              rehypePlugins={[rehypeRaw]}
               components={markdownComponents}
             >
               {message.content || "\u00a0"}
