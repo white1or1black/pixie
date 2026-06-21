@@ -666,22 +666,22 @@ function AppShell() {
     setFileExplorerOpen(true);
   }, []);
 
-  /** Format KB search results as a context block injected before the user's message. */
+  /** Format KB search results as a collapsible context block. */
   function formatKbContext(results: KbSearchResult[]): string {
     const entries = results
       .slice(0, 3)
       .map(
         (r, i) =>
-          `${i + 1}. **${r.title}** (${r.created?.split("T")[0] ?? "unknown date"})\n   ${r.snippet}`,
+          `  ${i + 1}. **${r.title}** (${r.created?.split("T")[0] ?? "unknown date"})\n     ${r.snippet}`,
       )
       .join("\n\n");
     return `\
-## Knowledge Base Context
-The following notes from the knowledge base may be relevant to the user's query. Use them to inform your response.
+<details>
+<summary>Knowledge Base Context (${results.length} notes)</summary>
 
 ${entries}
 
----`;
+</details>`;
   }
 
   // Show splash while loading
