@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use tokio::sync::Mutex;
 
+use crate::search::index::SearchIndex;
+
 // ---------------------------------------------------------------------------
 // Concurrency & dedup guards
 // ---------------------------------------------------------------------------
@@ -90,12 +92,16 @@ pub async fn summarize_with_guard(input: SummarizeInput) -> Result<()> {
         return Ok(());
     }
 
+    // Search existing notes for related content using BM25 + inverted index.
+    let related = find_related(&vault_dir, &title, &input.transcript, &conv_id).unwrap_or_default();
+
     let content = render_note(
         &title,
         &conv_id,
         input.workspace_path.as_deref(),
         input.engine.as_deref(),
         &input.transcript,
+        &related,
     );
     crate::atomic_write(&note_path, &content)
         .map_err(|e| anyhow::anyhow!("write note {}: {e}", note_path.display()))?;
@@ -117,7 +123,37 @@ pub async fn summarize_with_guard(input: SummarizeInput) -> Result<()> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Convert a title to a filesystem-friendly slug.
+/// Find up to 3 existing notes related to this conversation using BM25 search.
+/// Returns (title, path) pairs. Excludes the current conversation_id.
+fn find_related(
+    vault_dir: &Path,
+    title: &str,
+    transcript: &str,
+    current_conv_id: &str,
+) -> Result<Vec<(String, String)>> {
+    // Build a fresh index from the existing notes (before this one is written).
+    let index = SearchIndex::build_from_dir(vault_dir)?;
+    if index.doc_count() == 0 {
+        return Ok(vec![]);
+    }
+
+    // Use title + first 300 chars of body as the search query.
+    let query = format!(
+        "{} {}",
+        title,
+        transcript.chars().take(300).collect::<String>()
+    );
+
+    let results = index.search(&query, 5);
+    let related: Vec<_> = results
+        .into_iter()
+        .filter(|r| r.conversation_id != current_conv_id)
+        .take(3)
+        .map(|r| (r.title, r.path))
+        .collect();
+
+    Ok(related)
+}
 fn slugify(title: &str) -> String {
     let mut slug: String = title
         .chars()
@@ -169,11 +205,13 @@ fn render_note(
     workspace_path: Option<&str>,
     engine: Option<&str>,
     body: &str,
+    related: &[(String, String)],
 ) -> String {
     let created = Local::now().to_rfc3339();
     let ws = workspace_path.unwrap_or("");
     let eng = engine.unwrap_or("claude");
-    format!(
+
+    let mut note = format!(
         "---\n\
          title: \"{title}\"\n\
          conversation_id: \"{conv_id}\"\n\
@@ -185,7 +223,21 @@ fn render_note(
          created: {created}\n\
          ---\n\n\
          {body}\n"
-    )
+    );
+
+    if !related.is_empty() {
+        note.push_str("\n---\n\n## Related Knowledge\n\n");
+        for (rel_title, rel_path) in related {
+            // Obsidian wiki-link: use the note filename without extension.
+            let link_name = Path::new(rel_path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(rel_title);
+            note.push_str(&format!("- [[{link_name}|{rel_title}]]\n"));
+        }
+    }
+
+    note
 }
 
 // ---------------------------------------------------------------------------
@@ -212,6 +264,7 @@ mod tests {
             Some("/tmp/project"),
             Some("claude"),
             "## User\nHello\n\n## Assistant\nHi there",
+            &[],
         );
         assert!(content.starts_with("---\n"));
         assert!(content.contains("title: \"Test Title\""));
