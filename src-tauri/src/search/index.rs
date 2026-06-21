@@ -6,35 +6,27 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// A single indexed document.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Document {
     title: String,
     conversation_id: String,
     path: String,
     tags: Vec<String>,
     created: String,
-    /// Raw body text (for snippet extraction).
     raw_body: String,
-    /// Tokenized & lowercased body.
     body_tokens: Vec<String>,
-    /// Term frequencies for body.
     body_tf: HashMap<String, usize>,
-    /// Tokenized frontmatter fields for search.
     meta_tokens: Vec<String>,
-    /// Term frequencies for meta fields (title, tags, etc.).
     meta_tf: HashMap<String, usize>,
 }
 
 /// In-memory search index with inverted posting lists for O(k) search
 /// (k = number of docs containing at least one query term).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SearchIndex {
     docs: Vec<Document>,
-    /// Average document length (in tokens) across corpus.
     avg_dl: f64,
-    /// Document frequency: how many docs contain each term.
     df: HashMap<String, usize>,
-    /// Inverted index: term → list of doc indices containing that term.
     postings: HashMap<String, Vec<usize>>,
 }
 
@@ -223,6 +215,26 @@ impl SearchIndex {
 
     pub fn term_count(&self) -> usize {
         self.df.len()
+    }
+
+    /// Serialize the index to a JSON file for cold-start fast loading.
+    pub fn save_to_disk(&self, path: &Path) -> Result<()> {
+        let json = serde_json::to_string(self)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // Atomic write: temp file + rename.
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, &json)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    /// Load a previously saved index from disk.
+    pub fn load_from_disk(path: &Path) -> Result<Self> {
+        let json = std::fs::read_to_string(path)?;
+        let index: Self = serde_json::from_str(&json)?;
+        Ok(index)
     }
 }
 
