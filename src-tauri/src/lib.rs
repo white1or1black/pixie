@@ -1903,6 +1903,33 @@ async fn open_vault_folder(_app: AppHandle, vault_path: Option<String>) -> Resul
     Ok(())
 }
 
+/// Check whether Obsidian is installed on this machine.
+#[tauri::command]
+fn check_obsidian_installed() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        PathBuf::from("/Applications/Obsidian.app").exists()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Common install paths on Windows.
+        let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        PathBuf::from(&local)
+            .join("Obsidian")
+            .join("Obsidian.exe")
+            .exists()
+            || PathBuf::from("C:\\Program Files\\Obsidian\\Obsidian.exe").exists()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Check common Linux paths: AppImage, flatpak, or direct install.
+        PathBuf::from("/usr/bin/obsidian").exists()
+            || PathBuf::from("/usr/local/bin/obsidian").exists()
+            || PathBuf::from("/opt/Obsidian/obsidian").exists()
+            || PathBuf::from("/var/lib/flatpak/app/md.obsidian.Obsidian/current/active/files/obsidian").exists()
+    }
+}
+
 /// Open the vault in Obsidian by registering it in Obsidian's vault list and
 /// then using the `obsidian://open?vault=<name>` URI.
 ///
@@ -1912,6 +1939,11 @@ async fn open_vault_folder(_app: AppHandle, vault_path: Option<String>) -> Resul
 /// attempting to open it.
 #[tauri::command]
 async fn open_vault_in_obsidian(vault_path: Option<String>) -> Result<(), String> {
+    if !check_obsidian_installed() {
+        return Err(
+            "Obsidian is not installed. Download it from https://obsidian.md".to_string()
+        );
+    }
     let vault_path = match vault_path.as_deref() {
         Some(p) if !p.trim().is_empty() => p.to_string(),
         _ => default_vault_dir().to_string_lossy().into_owned(),
@@ -2925,6 +2957,7 @@ pub fn run() {
             get_default_vault_path,
             open_vault_folder,
             open_vault_in_obsidian,
+            check_obsidian_installed,
             search_kb,
             index_kb,
             backfill_list,

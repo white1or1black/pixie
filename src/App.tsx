@@ -639,9 +639,12 @@ function AppShell() {
 
   const handleOpenObsidian = useCallback(async () => {
     try {
+      const installed = await invoke<boolean>("check_obsidian_installed");
+      if (!installed) {
+        alert("Obsidian is not installed. Download it from https://obsidian.md to view your knowledge base.");
+        return;
+      }
       const vaultPath = getConfig().vaultPath ?? null;
-      // default_vault_dir() is already handled by the backend — always
-      // open in Obsidian, never fall back to Finder.
       await invoke("open_vault_in_obsidian", { vaultPath });
     } catch { /* ignore */ }
   }, []);
@@ -804,12 +807,14 @@ function AppShell() {
               </button>
               <button
                 onClick={handleOpenObsidian}
-                className="shrink-0 ml-1 p-1.5 rounded-lg text-[var(--text-secondary)] hover:bg-[var(--accent)]/20 transition-colors"
-                title="Open vault in Obsidian"
+                className="shrink-0 ml-1 p-1.5 rounded-lg text-[var(--text-secondary)] hover:bg-[var(--text-secondary)]/10 hover:text-[var(--text-primary)] transition-colors"
+                title="Open knowledge base in Obsidian"
               >
-                <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-                  <path d="M4 2h12a2 2 0 012 2v12a2 2 0 01-2 2H4a2 2 0 01-2-2V4a2 2 0 012-2z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                  <path d="M7 2v16M2 7h5M13 2v16M18 7h-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                  <path d="M12 2L3 7.5v9L12 22l9-5.5v-9L12 2z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  <path d="M12 2v20M3 7.5l9 5.5 9-5.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  <path d="M12 7.5v7" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
+                  <path d="M12 2L3 7.5M21 7.5L12 2" stroke="currentColor" strokeWidth="0.5" strokeLinecap="round" />
                 </svg>
               </button>
               <button

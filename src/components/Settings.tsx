@@ -223,10 +223,10 @@ export default function Settings({
             </p>
           </section>
 
-          {/* Obsidian Vault */}
+          {/* Knowledge Base */}
           <section>
             <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">
-              Obsidian Vault
+              Knowledge Base
             </h3>
             <div className="bg-[var(--bg-primary)] rounded-xl p-4 border border-[var(--border-color)]">
               <p className="text-xs text-[var(--text-secondary)] break-all font-mono mb-3">
@@ -248,9 +248,19 @@ export default function Settings({
                   </button>
                 )}
                 <button
-                  onClick={() => {
+                  onClick={async () => {
                     const path = vaultPath || defaultVaultPath;
-                    if (path) invoke("open_vault_in_obsidian", { vaultPath: path }).catch(() => {});
+                    if (!path) return;
+                    try {
+                      const installed = await invoke<boolean>("check_obsidian_installed");
+                      if (!installed) {
+                        alert("Obsidian is not installed. Download it from https://obsidian.md to view your knowledge base.");
+                        return;
+                      }
+                      await invoke("open_vault_in_obsidian", { vaultPath: path });
+                    } catch (e) {
+                      console.error(e);
+                    }
                   }}
                   className="px-3 py-1.5 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-xs font-medium transition-colors"
                 >
@@ -278,10 +288,10 @@ export default function Settings({
             </div>
             <p className="text-xs text-[var(--text-secondary)] mt-2">
               {vaultPath
-                ? "对话摘要将写入该 Vault 下的 Pixie/ 子目录。"
+                ? "Conversation notes are saved to the Pixie/ subdirectory of this folder. Open it with Obsidian or any markdown viewer."
                 : defaultVaultPath
-                  ? "未设置自定义 Vault，摘要将写入默认路径下的 Pixie/ 子目录。可设置 Obsidian Vault 目录以方便管理。"
-                  : "设置 Obsidian Vault 目录以启用知识库功能。"}
+                  ? "Using default location. Set a custom folder to manage notes with your preferred tools."
+                  : "Set a folder to enable knowledge base features."}
             </p>
           </section>
 
