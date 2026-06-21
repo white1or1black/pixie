@@ -1,6 +1,7 @@
 import { memo, useState, useCallback, useEffect, useRef, useMemo, type ReactNode, type ComponentPropsWithoutRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import rehypeRaw from "rehype-raw";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import type { Message, MessageUsage, PreviewRequest, ToolStep, PendingPermission } from "../types";
@@ -12,6 +13,96 @@ interface MessageBubbleProps {
   onOpenPreview: (t: PreviewRequest) => void;
   onRespondPermission?: (convId: string, requestId: string, allow: boolean) => void;
   conversationId?: string;
+}
+
+/** Render user message content, detecting and collapsing KB context blocks. */
+function UserContent({ content }: { content: string }) {
+  const ctxMatch = content.match(/^<details\b[\s\S]*?<\/details>\s*/);
+  if (ctxMatch) {
+    const ctxRaw = ctxMatch[0];
+    const question = content.slice(ctxMatch[0].length);
+
+    const sanitizeKbSnippet = (snippet: string): string => {
+      let s = snippet ?? "";
+      s = s.replace(/<details\b[\s\S]*?<\/details>/gi, " ");
+      s = s.replace(/<\/?[^>]+>/g, " ");
+      s = s.replace(/!\[\[[^\]]+?\]\]/g, " ");
+      s = s.replace(/\s+/g, " ").trim();
+      return s;
+    };
+
+    // Parse the summary line.
+    const summaryMatch = ctxRaw.match(/<summary>(.*?)<\/summary>/);
+    const summary = summaryMatch?.[1] ?? "Knowledge Base Context";
+
+    // Parse individual kb-entry divs: <strong> title / strong content <br> snippet.
+    const entries = [...ctxRaw.matchAll(
+      /<div class="kb-entry"><strong>([\d]+)\. (.*?)<\/strong>\s*\((.*?)\)<br>(.*?)<\/div>/g
+    )].map((m) => ({
+      index: m[1],
+      title: m[2],
+      date: m[3],
+      snippet: sanitizeKbSnippet(m[4]),
+    }));
+
+    return (
+      <KbContextBlock summary={summary} entries={entries} question={question} />
+    );
+  }
+
+  return (
+    <p className="whitespace-pre-wrap [overflow-wrap:anywhere] text-[var(--text-primary)] text-sm leading-relaxed m-0">
+      {content}
+    </p>
+  );
+}
+
+/** Collapsible knowledge base context block — pure React, no innerHTML. */
+function KbContextBlock({
+  summary,
+  entries,
+  question,
+}: {
+  summary: string;
+  entries: { index: string; title: string; date: string; snippet: string }[];
+  question: string;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div>
+      <div className="mb-1">
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className="text-xs text-[var(--text-secondary)] opacity-80 hover:opacity-100 transition-opacity flex items-center gap-1 cursor-pointer select-none"
+        >
+          <span className="text-[10px] leading-none">{open ? "▼" : "▶"}</span>
+          {summary}
+        </button>
+      </div>
+      {open && (
+        <div className="mb-2">
+          {entries.map((e) => (
+            <div key={e.index} className="kb-entry">
+              <strong>
+                {e.index}. {e.title}
+              </strong>{" "}
+              ({e.date})
+              <br />
+              <span className="kb-entry-snippet" title={e.snippet}>
+                {e.snippet}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      {question && (
+        <p className="whitespace-pre-wrap [overflow-wrap:anywhere] text-[var(--text-primary)] text-sm leading-relaxed m-0">
+          {question}
+        </p>
+      )}
+    </div>
+  );
 }
 
 function CopyButton({ text }: { text: string }) {
@@ -767,9 +858,7 @@ function MessageBubbleImpl({ message, onOpenPreview, onRespondPermission, conver
               </div>
             )}
             {message.content && (
-              <p className="whitespace-pre-wrap [overflow-wrap:anywhere] text-[var(--text-primary)] text-sm leading-relaxed m-0">
-                {message.content}
-              </p>
+              <UserContent content={message.content} />
             )}
           </div>
         ) : (
@@ -804,6 +893,7 @@ function MessageBubbleImpl({ message, onOpenPreview, onRespondPermission, conver
             ) : (
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
+              rehypePlugins={[rehypeRaw]}
               components={markdownComponents}
             >
               {message.content || "\u00a0"}

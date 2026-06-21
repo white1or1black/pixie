@@ -16,11 +16,13 @@ const Settings = lazy(() => import("./components/Settings"));
 const MarketplacePanel = lazy(() => import("./components/MarketplacePanel"));
 const ScheduledTasksPanel = lazy(() => import("./components/ScheduledTasksPanel"));
 const FileExplorer = lazy(() => import("./components/RightPanel"));
+const SearchPalette = lazy(() => import("./components/SearchPalette"));
 import { useScheduledTasks } from "./hooks/useScheduledTasks";
 import type {
   AgentEngineId,
   AuthState,
   EngineModelConfigs,
+  KbSearchResult,
   PreviewRequest,
   PreviewTarget,
   SkillEntry,
@@ -28,7 +30,7 @@ import type {
   EngineStatus,
 } from "./types";
 import { AGENT_ENGINES } from "./types";
-import { bootstrap, getConfig, updateConfig } from "./lib/storage";
+import { bootstrap, getConfig, getHistory, updateConfig } from "./lib/storage";
 
 // Brand mark — same art as the app/README icon.
 const iconUrl = new URL("./assets/icon.svg", import.meta.url).href;
@@ -340,6 +342,8 @@ function AppShell() {
     () => getConfig().engineModelConfigs,
   );
   const [skills, setSkills] = useState<SkillEntry[]>([]);
+  const [defaultVaultPath, setDefaultVaultPath] = useState<string | null>(null);
+  const [backfillStatus, setBackfillStatus] = useState<string | null>(null);
   // Composer drafts are kept per conversation (keyed by conversation id, derived
   // below once activeId is known) so each session binds its own input and
   // switching between them never clears what you've typed.
@@ -349,6 +353,8 @@ function AppShell() {
    *  ready; otherwise opened manually from Settings. Does NOT auto-close when an
    *  engine becomes ready — the user closes it (so they can see the state flip). */
   const [setupOpen, setSetupOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [kbEnabled, setKbEnabled] = useState(false);
   /** Has the first-launch "auto-open if nothing ready" check run yet. Tracked
    *  with state (not a ref) so it can drive a render-time setState — the React
    *  "adjust state during render" pattern — without tripping effect/ref rules. */
@@ -480,6 +486,13 @@ function AppShell() {
     updateConfig({ engineModelConfigs });
   }, [engineModelConfigs]);
 
+  // Fetch the default vault path (data_dir/kb) from the backend once.
+  useEffect(() => {
+    invoke<string | null>("get_default_vault_path")
+      .then(setDefaultVaultPath)
+      .catch(() => setDefaultVaultPath(null));
+  }, []);
+
   // Load skills for the skills picker: user-level always, project-level when a
   // workspace is active. `reloadSkills` is reused after a plugin install/uninstall
   // so the ✨ dropdown picks up newly added skills.
@@ -510,6 +523,10 @@ function AppShell() {
       if ((e.ctrlKey || e.metaKey) && e.key === ",") {
         e.preventDefault();
         setMainView((prev) => (prev === "settings" ? "chat" : "settings"));
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === "k") {
+        e.preventDefault();
+        setSearchOpen((prev) => !prev);
       }
     };
     window.addEventListener("keydown", handleKeyDown);
@@ -542,6 +559,116 @@ function AppShell() {
     changeDefaultWorkspace(null);
   }, [changeDefaultWorkspace]);
 
+  const handlePickVault = useCallback(async () => {
+    try {
+      const path = await invoke<string | null>("pick_folder");
+      if (path) updateConfig({ vaultPath: path });
+    } catch { /* ignore */ }
+  }, []);
+  const handleResetVault = useCallback(() => {
+    updateConfig({ vaultPath: null });
+  }, []);
+
+  const handleBackfill = useCallback(async () => {
+    setBackfillStatus("Scanning…");
+    try {
+      const vaultPath = getConfig().vaultPath ?? null;
+      const missing = await invoke<
+        { conversation_id: string; workspace_id: string; title: string }[]
+      >("backfill_list", { vaultPath });
+      if (missing.length === 0) {
+        setBackfillStatus("All conversations already in knowledge base.");
+        return;
+      }
+      setBackfillStatus(`Found ${missing.length} conversations to backfill…`);
+      const history = getHistory();
+      let done = 0;
+      for (const entry of missing) {
+        const histEntry = history.find(
+          (h) => h.conversation.id === entry.conversation_id,
+        );
+        if (!histEntry) continue;
+        const conv = histEntry.conversation;
+        // Build full conversation markdown with images, tools, thinking.
+        const parts: string[] = [];
+        for (const msg of conv.messages) {
+          if (msg.role === "system") continue;
+          const heading = msg.role === "user" ? "## User" : "## Assistant";
+          const subParts: string[] = [];
+          const text = msg.content.trim();
+          if (text) subParts.push(text);
+          if (msg.images?.length) {
+            subParts.push(msg.images.map((img: string) => `![[${img.split("/").pop() ?? img}]]`).join("\n"));
+          }
+          if (msg.tools?.length) {
+            subParts.push(msg.tools.map((t: { name: string; rawInput?: string; input?: unknown; result?: string }) => {
+              let line = `> **🔧 ${t.name}**`;
+              if (t.rawInput) line += `\n> Input: \`${t.rawInput.slice(0, 200)}\``;
+              else if (t.input) line += `\n> Input: \`${JSON.stringify(t.input).slice(0, 200)}\``;
+              if (t.result) line += `\n> Result: ${t.result.slice(0, 300)}`;
+              return line;
+            }).join("\n\n"));
+          }
+          if (msg.thinking?.trim()) {
+            subParts.push(`<details>\n<summary>Thinking</summary>\n\n${msg.thinking.trim()}\n\n</details>`);
+          }
+          if (subParts.length === 0) continue;
+          parts.push(`${heading}\n\n${subParts.join("\n\n")}`);
+        }
+        const transcript = parts.join("\n\n");
+        if (!transcript.trim()) continue;
+        try {
+          await invoke("summarize_conversation", {
+            conversationId: entry.conversation_id,
+            workspacePath: entry.workspace_id,
+            title: entry.title || null,
+            vaultPath,
+            engine: conv.engine ?? null,
+            transcript,
+            forceOverwrite: true,
+          });
+          done++;
+          setBackfillStatus(`Backfilling… ${done}/${missing.length}`);
+        } catch {
+          // Skip failed entries.
+        }
+      }
+      setBackfillStatus(`Done! ${done}/${missing.length} conversations added to knowledge base.`);
+    } catch (e) {
+      setBackfillStatus(`Backfill failed: ${e}`);
+    }
+  }, []);
+
+  function stripHtmlTags(input: string): string {
+    return input.replace(/<\/?[^>]+>/g, " ");
+  }
+
+  function sanitizeKbText(input: string, maxChars: number): string {
+    let s = input ?? "";
+    // Remove nested KB context blocks (e.g. when a note contains copied Pixie prompts).
+    s = s.replace(/<details\b[\s\S]*?<\/details>/gi, " ");
+    // Remove any remaining HTML tags so they can't break our lightweight parser.
+    s = stripHtmlTags(s);
+    // Drop Obsidian embed syntax (images/PDFs/etc.) which is noisy in previews.
+    s = s.replace(/!\[\[[^\]]+?\]\]/g, " ");
+    // Collapse whitespace so the HTML wrapper stays single-line and regex-friendly.
+    s = s.replace(/\s+/g, " ").trim();
+    if (s.length > maxChars) s = s.slice(0, maxChars) + " …";
+    return s;
+  }
+
+  const handleOpenObsidian = useCallback(async () => {
+    try {
+      const installed = await invoke<boolean>("check_obsidian_installed");
+      if (!installed) {
+        alert("Obsidian is not installed. Download it from https://obsidian.md to view your knowledge base.");
+        return;
+      }
+      const vaultPath = getConfig().vaultPath ?? null;
+      await invoke("open_vault_in_obsidian", { vaultPath });
+    } catch { /* ignore */ }
+  }, []);
+
   // Open a file path or URL in the right-side preview panel (clicked in a chat
   // message). The nonce lets the same target be re-opened.
   // Open a file path or URL from a chat message. URLs are delegated to the
@@ -556,6 +683,29 @@ function AppShell() {
     setPreviewTarget({ kind: "file", path: t.path, nonce });
     setFileExplorerOpen(true);
   }, []);
+
+  /** Format KB search results as a collapsible context block. */
+  function formatKbContext(results: KbSearchResult[]): string {
+    const entries = results
+      .slice(0, 3)
+      .map(
+        (r, i) => {
+          const title = sanitizeKbText(r.title ?? "Untitled", 120);
+          const date = sanitizeKbText(r.created?.split("T")[0] ?? "unknown date", 40);
+          const snippet = sanitizeKbText(r.snippet ?? "", 800);
+          return `<div class="kb-entry"><strong>${i + 1}. ${title}</strong> (${date})<br>${snippet}</div>`;
+        },
+      )
+      .join("\n");
+    return `\
+<details class="user-msg-details">
+<summary>Knowledge Base Context (${results.length} notes)</summary>
+
+${entries}
+
+</details>
+`;
+  }
 
   // Show splash while loading
   if (engineStatuses === null) {
@@ -689,6 +839,27 @@ function AppShell() {
                 </div>
               </div>
               <button
+                onClick={() => setSearchOpen(true)}
+                className="shrink-0 ml-2 p-1.5 rounded-lg text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] transition-colors"
+                title="Search knowledge base (Ctrl+K)"
+              >
+                <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                  <circle cx="8.5" cy="8.5" r="5.5" stroke="currentColor" strokeWidth="1.5" />
+                  <path d="M13 13L17 17" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                </svg>
+              </button>
+              <button
+                onClick={handleOpenObsidian}
+                className="shrink-0 ml-1 p-1.5 rounded-lg text-[var(--text-secondary)] hover:bg-[var(--text-secondary)]/10 hover:text-[var(--text-primary)] transition-colors"
+                title="Open knowledge base in Obsidian"
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <ellipse cx="12" cy="6" rx="8" ry="3" />
+                  <path d="M4 6v6c0 1.5 3.5 3 8 3s8-1.5 8-3V6" />
+                  <path d="M4 12v6c0 1.5 3.5 3 8 3s8-1.5 8-3v-6" />
+                </svg>
+              </button>
+              <button
                 onClick={() => setFileExplorerOpen((prev) => !prev)}
                 disabled={!activeWorkspace}
                 className={`shrink-0 ml-2 p-1.5 rounded-lg bg-[var(--bg-primary)] transition-colors ${
@@ -718,7 +889,30 @@ function AppShell() {
             </Suspense>
 
             <InputBar
-              onSend={(msg, images) => sendMessage(msg, undefined, images)}
+              onSend={(msg, images) => {
+                if (kbEnabled) {
+                  void (async () => {
+                    try {
+                      const vaultPath = getConfig().vaultPath ?? null;
+                      const results = await invoke<KbSearchResult[]>("search_kb", {
+                        query: msg.trim(),
+                        vaultPath,
+                      });
+                      if (results.length > 0) {
+                        const ctx = formatKbContext(results);
+                        sendMessage(`${ctx}\n${msg}`, undefined, images);
+                        return;
+                      }
+                    } catch (e) {
+                      console.error("[kb-context] search failed:", e);
+                    }
+                    // Fallback: send without KB context.
+                    sendMessage(msg, undefined, images);
+                  })();
+                } else {
+                  sendMessage(msg, undefined, images);
+                }
+              }}
               onStop={() => stopGeneration()}
               isGenerating={isGenerating}
               disabled={!activeWorkspace}
@@ -732,6 +926,8 @@ function AppShell() {
               model={activeConversation?.model}
               onModelChange={handleModelChange}
               engineModelConfigs={engineModelConfigs}
+              kbEnabled={kbEnabled}
+              onToggleKb={() => setKbEnabled((v) => !v)}
             />
           </>
         )}
@@ -796,6 +992,12 @@ function AppShell() {
             defaultWorkspacePath={defaultWorkspacePath}
             onPickDefaultWorkspace={handlePickDefaultWorkspace}
             onResetDefaultWorkspace={handleResetDefaultWorkspace}
+            vaultPath={getConfig().vaultPath}
+            onPickVault={handlePickVault}
+            onResetVault={handleResetVault}
+            defaultVaultPath={defaultVaultPath}
+            onBackfill={handleBackfill}
+            backfillStatus={backfillStatus}
           />
           </Suspense>
         )}
@@ -815,6 +1017,15 @@ function AppShell() {
           </Suspense>
         </div>
       )}
+
+      {/* Search palette popup — fixed overlay, doesn't shift page content */}
+      <Suspense fallback={null}>
+        <SearchPalette
+          open={searchOpen}
+          onClose={() => setSearchOpen(false)}
+          onOpenPreview={(path) => handleOpenPreview({ kind: "file", path })}
+        />
+      </Suspense>
     </div>
   );
 }

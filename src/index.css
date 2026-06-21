@@ -355,6 +355,42 @@ body {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Search palette animation                                                  */
+/* -------------------------------------------------------------------------- */
+
+@keyframes search-palette-in {
+  from {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.search-palette-enter {
+  animation: search-palette-in 0.15s ease-out;
+}
+
+/* Collapsible KB context in user messages */
+.kb-entry {
+  margin-bottom: 0.5rem;
+  padding-left: 0.5rem;
+  border-left: 2px solid var(--border-color);
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.kb-entry-snippet {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+  overflow: hidden;
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Spin animation (splash screen)                                            */
 /* -------------------------------------------------------------------------- */
 

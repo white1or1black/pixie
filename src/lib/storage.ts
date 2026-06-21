@@ -32,6 +32,8 @@ export interface AppConfig {
   /** Engine ids that have passed a readiness probe before, so returning users
    *  skip a billable ping on launch. Cleared for an engine when a probe fails. */
   knownReadyEngines: AgentEngineId[];
+  /** Path to the Obsidian vault directory. If null, conversation summaries are skipped. */
+  vaultPath: string | null;
 }
 
 export interface HistoryEntry {
@@ -51,6 +53,7 @@ const EMPTY_CONFIG: AppConfig = {
   workspaces: [],
   activeWorkspaceId: null,
   knownReadyEngines: [],
+  vaultPath: null,
 };
 
 let config: AppConfig = EMPTY_CONFIG;
@@ -131,6 +134,7 @@ interface ConfigWire {
   workspaces?: unknown;
   active_workspace_id?: string | null;
   known_ready_engines?: unknown;
+  vault_path?: string | null;
 }
 
 function isValidEngine(v: unknown): v is AgentEngineId {
@@ -187,6 +191,7 @@ function wireToConfig(w: ConfigWire | null): AppConfig {
     activeWorkspaceId:
       typeof w.active_workspace_id === "string" ? w.active_workspace_id : null,
     knownReadyEngines: coerceEngineIds(w.known_ready_engines),
+    vaultPath: typeof w.vault_path === "string" ? w.vault_path : null,
   };
 }
 
@@ -199,6 +204,7 @@ function configToWire(c: AppConfig): ConfigWire {
     workspaces: c.workspaces,
     active_workspace_id: c.activeWorkspaceId,
     known_ready_engines: c.knownReadyEngines,
+    vault_path: c.vaultPath,
   };
 }
 
@@ -293,6 +299,7 @@ function migrateFromLocalStorage(): { config: AppConfig; history: HistoryEntry[]
     workspaces,
     activeWorkspaceId: typeof data.activeWorkspaceId === "string" ? data.activeWorkspaceId : null,
     knownReadyEngines: [],
+    vaultPath: null,
   };
 
   return { config, history };

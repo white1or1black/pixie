@@ -1,5 +1,7 @@
 mod engine;
 mod pty;
+mod search;
+mod summarizer;
 
 use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone, Utc};
 use engine::persistent::{
@@ -49,6 +51,10 @@ pub struct AppConfig {
     /// returning users, and removes an id when a later probe fails.
     #[serde(default)]
     pub known_ready_engines: Vec<String>,
+    /// Path to the Obsidian vault directory. If unset, conversation summaries
+    /// are skipped silently (no fallback to a hidden data-dir folder).
+    #[serde(default)]
+    pub vault_path: Option<String>,
 }
 
 /// One line of `history.jsonl`: a conversation (full, with messages) and the
@@ -858,7 +864,8 @@ fn open_external(target: String) -> Result<(), String> {
     let ok = lower.starts_with("http://")
         || lower.starts_with("https://")
         || lower.starts_with("mailto:")
-        || lower.starts_with("tel:");
+        || lower.starts_with("tel:")
+        || lower.starts_with("obsidian://");
     if !ok {
         return Err(format!("Refusing to open non-URL target: {}", target));
     }
@@ -1706,6 +1713,377 @@ async fn save_app_config(config: AppConfig, app: AppHandle) -> Result<(), String
     atomic_write(&data_dir.join("config.json"), &json)
 }
 
+/// Fire-and-forget: summarize a conversation and write an Obsidian note.
+/// Returns immediately after spawning a background task; errors are logged,
+/// never surfaced to the caller.
+#[tauri::command]
+async fn summarize_conversation(
+    _app: AppHandle,
+    conversation_id: String,
+    workspace_path: Option<String>,
+    title: Option<String>,
+    vault_path: Option<String>,
+    engine: Option<String>,
+    transcript: String,
+    force_overwrite: Option<bool>,
+) -> Result<(), String> {
+    let input = summarizer::SummarizeInput {
+        conversation_id,
+        vault_path,
+        workspace_path,
+        title_hint: title.unwrap_or_default(),
+        engine,
+        transcript,
+        force_overwrite: force_overwrite.unwrap_or(false),
+    };
+    tokio::spawn(async move {
+        if let Err(e) = summarizer::summarize_with_guard(input).await {
+            log::error!("[summarize] top-level: {e:#}");
+        }
+    });
+    Ok(())
+}
+
+/// Backfill: iterate history, find conversations without existing KB notes,
+/// and return the list of (conversation_id, workspace_id, title) that need
+/// summarization. The frontend then builds transcripts and calls
+/// summarize_conversation for each one.
+#[tauri::command]
+async fn backfill_list(
+    app: AppHandle,
+    vault_path: Option<String>,
+) -> Result<Vec<BackfillEntry>, String> {
+    let data_dir = get_data_dir(&app)?;
+    let vault = match vault_path.as_deref() {
+        Some(p) if !p.trim().is_empty() => PathBuf::from(p),
+        _ => data_dir.join("kb"),
+    };
+    let pixie_dir = vault.join("Pixie");
+
+    // Collect existing conversation IDs from the vault.
+    let mut existing_ids = std::collections::HashSet::new();
+    if pixie_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&pixie_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                // Extract convId from pattern *-<convId>.md
+                if let Some(conv_id) = name
+                    .strip_suffix(".md")
+                    .and_then(|s| s.rsplit_once('-').map(|(_, id)| id.to_string()))
+                {
+                    existing_ids.insert(conv_id);
+                }
+            }
+        }
+    }
+
+    // Load history and find missing entries.
+    let history_file = data_dir.join("history.jsonl");
+    let mut missing = Vec::new();
+    if history_file.exists() {
+        let content = fs::read_to_string(&history_file)
+            .map_err(|e| format!("Failed to read history: {e}"))?;
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(entry) = serde_json::from_str::<HistoryEntry>(line) {
+                let conv = &entry.conversation;
+                let conv_id = conv.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let title = conv.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let _engine = conv.get("engine").and_then(|v| v.as_str()).unwrap_or("claude");
+
+                if conv_id.is_empty() || existing_ids.contains(conv_id) {
+                    continue;
+                }
+                // Skip conversations with no messages.
+                let msg_count = conv
+                    .get("messages")
+                    .and_then(|m| m.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                if msg_count == 0 {
+                    continue;
+                }
+
+                missing.push(BackfillEntry {
+                    conversation_id: conv_id.to_string(),
+                    workspace_id: entry.workspace_id.clone(),
+                    title: title.to_string(),
+                });
+            }
+        }
+    }
+
+    Ok(missing)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BackfillEntry {
+    conversation_id: String,
+    workspace_id: String,
+    title: String,
+}
+
+/// Search the knowledge base with a BM25 query. Returns ranked results.
+#[tauri::command]
+async fn search_kb(
+    _app: AppHandle,
+    query: String,
+    vault_path: Option<String>,
+) -> Result<Vec<search::index::SearchResult>, String> {
+    let vault = match vault_path.as_deref() {
+        Some(p) if !p.trim().is_empty() => PathBuf::from(p),
+        _ => default_vault_dir(),
+    };
+    search::search(&query, &vault, 10)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Rebuild the search index (e.g. after new notes are written).
+#[tauri::command]
+async fn index_kb(
+    _app: AppHandle,
+    vault_path: Option<String>,
+) -> Result<search::index::SearchIndexStats, String> {
+    let vault = match vault_path.as_deref() {
+        Some(p) if !p.trim().is_empty() => PathBuf::from(p),
+        _ => default_vault_dir(),
+    };
+    search::rebuild_index(&vault)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Return the effective vault path: the configured `vaultPath` if set, otherwise
+/// the default `<data_dir>/kb`. Returns `None` if the data dir cannot be resolved.
+#[tauri::command]
+async fn get_default_vault_path(_app: AppHandle) -> Result<Option<String>, String> {
+    // Place the default vault under the user's Documents directory so it's
+    // visible in Finder and can be synced via iCloud.  Falls back to the
+    // app data directory if Documents isn't available.
+    let kb = default_vault_dir();
+    let _ = fs::create_dir_all(&kb);
+    Ok(Some(kb.to_string_lossy().into_owned()))
+}
+
+/// Open the vault's Pixie/ subdirectory in the system file manager.
+#[tauri::command]
+async fn open_vault_folder(_app: AppHandle, vault_path: Option<String>) -> Result<(), String> {
+    let vault = match vault_path.as_deref() {
+        Some(p) if !p.trim().is_empty() => PathBuf::from(p),
+        _ => default_vault_dir(),
+    };
+    let pixie_dir = vault.join("Pixie");
+    // Ensure the directory exists so Finder/Explorer doesn't open a missing path.
+    let _ = fs::create_dir_all(&pixie_dir);
+    #[cfg(target_os = "macos")]
+    {
+        tokio::process::Command::new("open")
+            .arg(&pixie_dir)
+            .spawn()
+            .map_err(|e| format!("Failed to open folder: {e}"))?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        tokio::process::Command::new("explorer")
+            .arg(&pixie_dir)
+            .spawn()
+            .map_err(|e| format!("Failed to open folder: {e}"))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        tokio::process::Command::new("xdg-open")
+            .arg(&pixie_dir)
+            .spawn()
+            .map_err(|e| format!("Failed to open folder: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Check whether Obsidian is installed on this machine.
+#[tauri::command]
+fn check_obsidian_installed() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        PathBuf::from("/Applications/Obsidian.app").exists()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Common install paths on Windows.
+        let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        PathBuf::from(&local)
+            .join("Obsidian")
+            .join("Obsidian.exe")
+            .exists()
+            || PathBuf::from("C:\\Program Files\\Obsidian\\Obsidian.exe").exists()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Check common Linux paths: AppImage, flatpak, or direct install.
+        PathBuf::from("/usr/bin/obsidian").exists()
+            || PathBuf::from("/usr/local/bin/obsidian").exists()
+            || PathBuf::from("/opt/Obsidian/obsidian").exists()
+            || PathBuf::from("/var/lib/flatpak/app/md.obsidian.Obsidian/current/active/files/obsidian").exists()
+    }
+}
+
+/// Open the vault in Obsidian by registering it in Obsidian's vault list and
+/// then using the `obsidian://open?vault=<name>` URI.
+///
+/// Obsidian identifies vaults by name (typically the folder name), but it must
+/// first know about the vault — the vault must be in Obsidian's vault registry
+/// (`obsidian.json`).  This function ensures the vault is registered before
+/// attempting to open it.
+#[tauri::command]
+async fn open_vault_in_obsidian(vault_path: Option<String>) -> Result<(), String> {
+    if !check_obsidian_installed() {
+        return Err(
+            "Obsidian is not installed. Download it from https://obsidian.md".to_string()
+        );
+    }
+    let vault_path = match vault_path.as_deref() {
+        Some(p) if !p.trim().is_empty() => p.to_string(),
+        _ => default_vault_dir().to_string_lossy().into_owned(),
+    };
+    let vault = PathBuf::from(&vault_path);
+
+    // 1. Ensure .obsidian/ exists so Obsidian recognizes this as a valid vault.
+    let obsidian_dir = vault.join(".obsidian");
+    fs::create_dir_all(&obsidian_dir).map_err(|e| format!("Cannot create .obsidian: {e}"))?;
+
+    let vault_name = vault
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Pixie".to_string());
+
+    // Write app.json if missing.
+    let app_json = obsidian_dir.join("app.json");
+    if !app_json.exists() {
+        fs::write(&app_json, format!("{{\"vaultName\":\"{vault_name}\"}}"))
+            .map_err(|e| format!("Cannot write app.json: {e}"))?;
+    }
+    // Also create appearance.json to prevent Obsidian from showing a
+    // "this vault needs to be upgraded" prompt on first open.
+    let appearance_json = obsidian_dir.join("appearance.json");
+    if !appearance_json.exists() {
+        fs::write(&appearance_json, "{}").ok();
+    }
+
+    // 2. Register the vault in Obsidian's vault list.
+    register_vault_in_obsidian(&vault_path, &vault_name).await?;
+
+    // 3. Open using the vault name (now registered).
+    let url = format!(
+        "obsidian://open?vault={}",
+        urlencoding::encode(&vault_name),
+    );
+
+    #[cfg(target_os = "macos")]
+    {
+        tokio::process::Command::new("open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| format!("Failed to open Obsidian: {e}"))?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        tokio::process::Command::new("cmd")
+            .args(["/c", "start", "", &url])
+            .spawn()
+            .map_err(|e| format!("Failed to open Obsidian: {e}"))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        tokio::process::Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| format!("Failed to open Obsidian: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Read Obsidian's vault registry (`obsidian.json`), add our vault if it's
+/// not already listed, and write the updated config back.
+async fn register_vault_in_obsidian(vault_path: &str, _vault_name: &str) -> Result<(), String> {
+    let base = directories::BaseDirs::new().ok_or("Cannot find home directory")?;
+
+    // Obsidian stores its config in different locations per platform.
+    #[cfg(target_os = "macos")]
+    let obsidian_config = base
+        .home_dir()
+        .join("Library")
+        .join("Application Support")
+        .join("obsidian")
+        .join("obsidian.json");
+    #[cfg(target_os = "windows")]
+    let obsidian_config = base
+        .config_dir()
+        .join("obsidian")
+        .join("obsidian.json");
+    #[cfg(target_os = "linux")]
+    let obsidian_config = base
+        .config_dir()
+        .join("obsidian")
+        .join("obsidian.json");
+
+    // If obsidian.json doesn't exist, Obsidian may not be installed / never
+    // launched.  Skip registration — the `open` command will still launch
+    // Obsidian; the user may need to open the vault manually the first time.
+    if !obsidian_config.exists() {
+        log::warn!("obsidian.json not found at {}", obsidian_config.display());
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&obsidian_config)
+        .map_err(|e| format!("Cannot read obsidian.json: {e}"))?;
+
+    let mut config: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Cannot parse obsidian.json: {e}"))?;
+
+    // Check if our vault path is already in the vaults map.
+    if let Some(vaults) = config.get("vaults").and_then(|v| v.as_object()) {
+        let already_registered = vaults.values().any(|v| {
+            v.get("path")
+                .and_then(|p| p.as_str())
+                .map(|p| p == vault_path)
+                .unwrap_or(false)
+        });
+        if already_registered {
+            return Ok(());
+        }
+    }
+
+    // Generate a unique vault ID (16 hex chars, matching Obsidian's format).
+    let vault_id = &uuid::Uuid::new_v4().to_string()[..16];
+
+    let entry = serde_json::json!({
+        "path": vault_path,
+        "ts": chrono::Utc::now().timestamp(),
+    });
+
+    if let Some(vaults) = config
+        .get_mut("vaults")
+        .and_then(|v| v.as_object_mut())
+    {
+        vaults.insert(vault_id.to_string(), entry);
+    } else {
+        let mut vaults = serde_json::Map::new();
+        vaults.insert(vault_id.to_string(), entry);
+        config["vaults"] = serde_json::Value::Object(vaults);
+    }
+
+    let updated = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("Cannot serialize obsidian.json: {e}"))?;
+
+    atomic_write(&obsidian_config, &updated)
+        .map_err(|e| format!("Cannot write obsidian.json: {e}"))?;
+
+    Ok(())
+}
+
 /// Load every conversation from `history.jsonl` (one entry per line). Malformed
 /// lines are skipped so a single bad line can't prevent startup.
 #[tauri::command]
@@ -1808,11 +2186,24 @@ fn get_data_dir(_app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dirs.data_dir().to_path_buf())
 }
 
+/// Default Obsidian vault directory: `~/Documents/Pixie` (or platform equivalent).
+/// Falls back to `<app-data>/kb` if Documents isn't available.
+pub(crate) fn default_vault_dir() -> PathBuf {
+    directories::UserDirs::new()
+        .and_then(|u| u.document_dir().map(|p| p.join("Pixie")))
+        .unwrap_or_else(|| {
+            // Fallback: app data directory.
+            directories::ProjectDirs::from("com", "pixie", "Pixie")
+                .map(|d| d.data_dir().join("kb"))
+                .unwrap_or_else(|| PathBuf::from("Pixie"))
+        })
+}
+
 /// Atomically replace `path` with `content`: write to a temp file in the SAME
 /// directory, then rename over the target. On macOS `fs::rename` is atomic
 /// within one volume (the data dir always is), so a crash mid-write leaves the
 /// previous file intact instead of a truncated/corrupt one.
-fn atomic_write(path: &std::path::Path, content: &str) -> Result<(), String> {
+pub(crate) fn atomic_write(path: &std::path::Path, content: &str) -> Result<(), String> {
     let dir = path
         .parent()
         .ok_or_else(|| "target path has no parent".to_string())?;
@@ -2562,6 +2953,14 @@ pub fn run() {
             toggle_scheduled_task,
             run_scheduled_task_now,
             list_task_runs,
+            summarize_conversation,
+            get_default_vault_path,
+            open_vault_folder,
+            open_vault_in_obsidian,
+            check_obsidian_installed,
+            search_kb,
+            index_kb,
+            backfill_list,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

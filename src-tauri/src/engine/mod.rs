@@ -2,7 +2,7 @@ pub mod claude;
 pub mod codebuddy;
 pub mod cursor;
 pub mod persistent;
-mod shared;
+pub(crate) mod shared;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
