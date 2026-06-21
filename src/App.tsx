@@ -22,6 +22,7 @@ import type {
   AgentEngineId,
   AuthState,
   EngineModelConfigs,
+  KbSearchResult,
   PreviewRequest,
   PreviewTarget,
   SkillEntry,
@@ -353,6 +354,7 @@ function AppShell() {
    *  engine becomes ready — the user closes it (so they can see the state flip). */
   const [setupOpen, setSetupOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [kbEnabled, setKbEnabled] = useState(false);
   /** Has the first-launch "auto-open if nothing ready" check run yet. Tracked
    *  with state (not a ref) so it can drive a render-time setState — the React
    *  "adjust state during render" pattern — without tripping effect/ref rules. */
@@ -664,6 +666,24 @@ function AppShell() {
     setFileExplorerOpen(true);
   }, []);
 
+  /** Format KB search results as a context block injected before the user's message. */
+  function formatKbContext(results: KbSearchResult[]): string {
+    const entries = results
+      .slice(0, 3)
+      .map(
+        (r, i) =>
+          `${i + 1}. **${r.title}** (${r.created?.split("T")[0] ?? "unknown date"})\n   ${r.snippet}`,
+      )
+      .join("\n\n");
+    return `\
+## Knowledge Base Context
+The following notes from the knowledge base may be relevant to the user's query. Use them to inform your response.
+
+${entries}
+
+---`;
+  }
+
   // Show splash while loading
   if (engineStatuses === null) {
     return <SplashScreen />;
@@ -857,7 +877,30 @@ function AppShell() {
             </Suspense>
 
             <InputBar
-              onSend={(msg, images) => sendMessage(msg, undefined, images)}
+              onSend={(msg, images) => {
+                if (kbEnabled) {
+                  void (async () => {
+                    try {
+                      const vaultPath = getConfig().vaultPath ?? null;
+                      const results = await invoke<KbSearchResult[]>("search_kb", {
+                        query: msg.trim(),
+                        vaultPath,
+                      });
+                      if (results.length > 0) {
+                        const ctx = formatKbContext(results);
+                        sendMessage(`${ctx}\n${msg}`, undefined, images);
+                        return;
+                      }
+                    } catch (e) {
+                      console.error("[kb-context] search failed:", e);
+                    }
+                    // Fallback: send without KB context.
+                    sendMessage(msg, undefined, images);
+                  })();
+                } else {
+                  sendMessage(msg, undefined, images);
+                }
+              }}
               onStop={() => stopGeneration()}
               isGenerating={isGenerating}
               disabled={!activeWorkspace}
@@ -871,6 +914,8 @@ function AppShell() {
               model={activeConversation?.model}
               onModelChange={handleModelChange}
               engineModelConfigs={engineModelConfigs}
+              kbEnabled={kbEnabled}
+              onToggleKb={() => setKbEnabled((v) => !v)}
             />
           </>
         )}
