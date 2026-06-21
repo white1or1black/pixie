@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import type { EngineStatus, AgentEngineId, EngineModelConfigs } from "../types";
 import { AGENT_ENGINES, ENGINE_MODEL_FIELDS } from "../types";
@@ -30,6 +31,12 @@ interface SettingsProps {
   defaultWorkspacePath: string;
   onPickDefaultWorkspace: () => void;
   onResetDefaultWorkspace: () => void;
+  vaultPath: string | null;
+  onPickVault: () => void;
+  onResetVault: () => void;
+  defaultVaultPath: string | null;
+  onBackfill: () => void;
+  backfillStatus: string | null;
 }
 
 export default function Settings({
@@ -49,6 +56,12 @@ export default function Settings({
   defaultWorkspacePath,
   onPickDefaultWorkspace,
   onResetDefaultWorkspace,
+  vaultPath,
+  onPickVault,
+  onResetVault,
+  defaultVaultPath,
+  onBackfill,
+  backfillStatus,
 }: SettingsProps) {
   const handleDragRegion = useDragRegion();
   const [_checking, setChecking] = useState(false);
@@ -207,6 +220,68 @@ export default function Settings({
             <p className="text-xs text-[var(--text-secondary)] mt-2">
               The folder Pixie uses when none is selected. Applied on a fresh start with no
               workspaces added — existing workspaces are not changed.
+            </p>
+          </section>
+
+          {/* Obsidian Vault */}
+          <section>
+            <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">
+              Obsidian Vault
+            </h3>
+            <div className="bg-[var(--bg-primary)] rounded-xl p-4 border border-[var(--border-color)]">
+              <p className="text-xs text-[var(--text-secondary)] break-all font-mono mb-3">
+                {vaultPath || defaultVaultPath || "—"}
+              </p>
+              <div className="flex gap-2 flex-wrap">
+                <button
+                  onClick={onPickVault}
+                  className="px-3 py-1.5 rounded-lg bg-[var(--bg-tertiary)] hover:bg-[var(--accent)]/20 text-xs text-[var(--text-primary)] transition-colors"
+                >
+                  Change…
+                </button>
+                {vaultPath && (
+                  <button
+                    onClick={onResetVault}
+                    className="px-3 py-1.5 rounded-lg bg-[var(--bg-primary)] hover:bg-[var(--bg-tertiary)] text-xs text-[var(--text-secondary)] border border-[var(--border-color)] transition-colors"
+                  >
+                    Reset
+                  </button>
+                )}
+                <button
+                  onClick={() => {
+                    const path = vaultPath || defaultVaultPath;
+                    if (path) invoke("open_vault_in_obsidian", { vaultPath: path }).catch(() => {});
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-xs font-medium transition-colors"
+                >
+                  Open in Obsidian
+                </button>
+                <button
+                  onClick={() => {
+                    const path = vaultPath || null;
+                    invoke("open_vault_folder", { vaultPath: path }).catch(() => {});
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-[var(--bg-tertiary)] hover:bg-[var(--accent)]/20 text-xs text-[var(--text-primary)] transition-colors"
+                >
+                  Open Folder
+                </button>
+                <button
+                  onClick={onBackfill}
+                  className="px-3 py-1.5 rounded-lg bg-[var(--bg-tertiary)] hover:bg-[var(--accent)]/20 text-xs text-[var(--text-primary)] transition-colors"
+                >
+                  Backfill History
+                </button>
+              </div>
+              {backfillStatus && (
+                <p className="text-xs text-[var(--accent)] mt-2">{backfillStatus}</p>
+              )}
+            </div>
+            <p className="text-xs text-[var(--text-secondary)] mt-2">
+              {vaultPath
+                ? "对话摘要将写入该 Vault 下的 Pixie/ 子目录。"
+                : defaultVaultPath
+                  ? "未设置自定义 Vault，摘要将写入默认路径下的 Pixie/ 子目录。可设置 Obsidian Vault 目录以方便管理。"
+                  : "设置 Obsidian Vault 目录以启用知识库功能。"}
             </p>
           </section>
 

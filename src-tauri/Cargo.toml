@@ -38,3 +38,7 @@ portable-pty = "0.9.0"
 libc = "0.2.186"
 # Decodes base64-encoded pasted-image bytes coming from the webview clipboard.
 base64 = "0.22"
+# URL-encoding for Obsidian URI scheme (obsidian://open?vault=...).
+urlencoding = "2"
+# Chinese word segmentation for CJK search tokenization.
+jieba-rs = "0.10"

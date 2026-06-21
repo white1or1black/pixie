@@ -372,3 +372,20 @@ export interface ParsedDiff {
 /** Render mode for the diff viewer. */
 export type DiffViewMode = "unified" | "split";
 
+/** BM25 search result from the knowledge base. */
+export interface KbSearchResult {
+  title: string;
+  conversation_id: string;
+  path: string;
+  snippet: string;
+  tags: string[];
+  created: string;
+  score: number;
+}
+
+/** Statistics about the search index. */
+export interface SearchIndexStats {
+  doc_count: number;
+  term_count: number;
+}
+

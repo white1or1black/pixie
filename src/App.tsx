@@ -16,6 +16,7 @@ const Settings = lazy(() => import("./components/Settings"));
 const MarketplacePanel = lazy(() => import("./components/MarketplacePanel"));
 const ScheduledTasksPanel = lazy(() => import("./components/ScheduledTasksPanel"));
 const FileExplorer = lazy(() => import("./components/RightPanel"));
+const SearchPalette = lazy(() => import("./components/SearchPalette"));
 import { useScheduledTasks } from "./hooks/useScheduledTasks";
 import type {
   AgentEngineId,
@@ -28,7 +29,7 @@ import type {
   EngineStatus,
 } from "./types";
 import { AGENT_ENGINES } from "./types";
-import { bootstrap, getConfig, updateConfig } from "./lib/storage";
+import { bootstrap, getConfig, getHistory, updateConfig } from "./lib/storage";
 
 // Brand mark — same art as the app/README icon.
 const iconUrl = new URL("./assets/icon.svg", import.meta.url).href;
@@ -340,6 +341,8 @@ function AppShell() {
     () => getConfig().engineModelConfigs,
   );
   const [skills, setSkills] = useState<SkillEntry[]>([]);
+  const [defaultVaultPath, setDefaultVaultPath] = useState<string | null>(null);
+  const [backfillStatus, setBackfillStatus] = useState<string | null>(null);
   // Composer drafts are kept per conversation (keyed by conversation id, derived
   // below once activeId is known) so each session binds its own input and
   // switching between them never clears what you've typed.
@@ -349,6 +352,7 @@ function AppShell() {
    *  ready; otherwise opened manually from Settings. Does NOT auto-close when an
    *  engine becomes ready — the user closes it (so they can see the state flip). */
   const [setupOpen, setSetupOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   /** Has the first-launch "auto-open if nothing ready" check run yet. Tracked
    *  with state (not a ref) so it can drive a render-time setState — the React
    *  "adjust state during render" pattern — without tripping effect/ref rules. */
@@ -480,6 +484,13 @@ function AppShell() {
     updateConfig({ engineModelConfigs });
   }, [engineModelConfigs]);
 
+  // Fetch the default vault path (data_dir/kb) from the backend once.
+  useEffect(() => {
+    invoke<string | null>("get_default_vault_path")
+      .then(setDefaultVaultPath)
+      .catch(() => setDefaultVaultPath(null));
+  }, []);
+
   // Load skills for the skills picker: user-level always, project-level when a
   // workspace is active. `reloadSkills` is reused after a plugin install/uninstall
   // so the ✨ dropdown picks up newly added skills.
@@ -511,6 +522,10 @@ function AppShell() {
         e.preventDefault();
         setMainView((prev) => (prev === "settings" ? "chat" : "settings"));
       }
+      if ((e.ctrlKey || e.metaKey) && e.key === "k") {
+        e.preventDefault();
+        setSearchOpen((prev) => !prev);
+      }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
@@ -541,6 +556,95 @@ function AppShell() {
   const handleResetDefaultWorkspace = useCallback(() => {
     changeDefaultWorkspace(null);
   }, [changeDefaultWorkspace]);
+
+  const handlePickVault = useCallback(async () => {
+    try {
+      const path = await invoke<string | null>("pick_folder");
+      if (path) updateConfig({ vaultPath: path });
+    } catch { /* ignore */ }
+  }, []);
+  const handleResetVault = useCallback(() => {
+    updateConfig({ vaultPath: null });
+  }, []);
+
+  const handleBackfill = useCallback(async () => {
+    setBackfillStatus("Scanning…");
+    try {
+      const vaultPath = getConfig().vaultPath ?? null;
+      const missing = await invoke<
+        { conversation_id: string; workspace_id: string; title: string }[]
+      >("backfill_list", { vaultPath });
+      if (missing.length === 0) {
+        setBackfillStatus("All conversations already in knowledge base.");
+        return;
+      }
+      setBackfillStatus(`Found ${missing.length} conversations to backfill…`);
+      const history = getHistory();
+      let done = 0;
+      for (const entry of missing) {
+        const histEntry = history.find(
+          (h) => h.conversation.id === entry.conversation_id,
+        );
+        if (!histEntry) continue;
+        const conv = histEntry.conversation;
+        // Build full conversation markdown with images, tools, thinking.
+        const parts: string[] = [];
+        for (const msg of conv.messages) {
+          if (msg.role === "system") continue;
+          const heading = msg.role === "user" ? "## User" : "## Assistant";
+          const subParts: string[] = [];
+          const text = msg.content.trim();
+          if (text) subParts.push(text);
+          if (msg.images?.length) {
+            subParts.push(msg.images.map((img: string) => `![[${img.split("/").pop() ?? img}]]`).join("\n"));
+          }
+          if (msg.tools?.length) {
+            subParts.push(msg.tools.map((t: { name: string; rawInput?: string; input?: unknown; result?: string }) => {
+              let line = `> **🔧 ${t.name}**`;
+              if (t.rawInput) line += `\n> Input: \`${t.rawInput.slice(0, 200)}\``;
+              else if (t.input) line += `\n> Input: \`${JSON.stringify(t.input).slice(0, 200)}\``;
+              if (t.result) line += `\n> Result: ${t.result.slice(0, 300)}`;
+              return line;
+            }).join("\n\n"));
+          }
+          if (msg.thinking?.trim()) {
+            subParts.push(`<details>\n<summary>Thinking</summary>\n\n${msg.thinking.trim()}\n\n</details>`);
+          }
+          if (subParts.length === 0) continue;
+          parts.push(`${heading}\n\n${subParts.join("\n\n")}`);
+        }
+        const transcript = parts.join("\n\n");
+        if (!transcript.trim()) continue;
+        try {
+          await invoke("summarize_conversation", {
+            conversationId: entry.conversation_id,
+            workspacePath: entry.workspace_id,
+            title: entry.title || null,
+            vaultPath,
+            engine: conv.engine ?? null,
+            transcript,
+            forceOverwrite: true,
+          });
+          done++;
+          setBackfillStatus(`Backfilling… ${done}/${missing.length}`);
+        } catch {
+          // Skip failed entries.
+        }
+      }
+      setBackfillStatus(`Done! ${done}/${missing.length} conversations added to knowledge base.`);
+    } catch (e) {
+      setBackfillStatus(`Backfill failed: ${e}`);
+    }
+  }, []);
+
+  const handleOpenObsidian = useCallback(async () => {
+    try {
+      const vaultPath = getConfig().vaultPath ?? null;
+      // default_vault_dir() is already handled by the backend — always
+      // open in Obsidian, never fall back to Finder.
+      await invoke("open_vault_in_obsidian", { vaultPath });
+    } catch { /* ignore */ }
+  }, []);
 
   // Open a file path or URL in the right-side preview panel (clicked in a chat
   // message). The nonce lets the same target be re-opened.
@@ -689,6 +793,26 @@ function AppShell() {
                 </div>
               </div>
               <button
+                onClick={() => setSearchOpen(true)}
+                className="shrink-0 ml-2 p-1.5 rounded-lg text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] transition-colors"
+                title="Search knowledge base (Ctrl+K)"
+              >
+                <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                  <circle cx="8.5" cy="8.5" r="5.5" stroke="currentColor" strokeWidth="1.5" />
+                  <path d="M13 13L17 17" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                </svg>
+              </button>
+              <button
+                onClick={handleOpenObsidian}
+                className="shrink-0 ml-1 p-1.5 rounded-lg text-[var(--text-secondary)] hover:bg-[var(--accent)]/20 transition-colors"
+                title="Open vault in Obsidian"
+              >
+                <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                  <path d="M4 2h12a2 2 0 012 2v12a2 2 0 01-2 2H4a2 2 0 01-2-2V4a2 2 0 012-2z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                  <path d="M7 2v16M2 7h5M13 2v16M18 7h-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                </svg>
+              </button>
+              <button
                 onClick={() => setFileExplorerOpen((prev) => !prev)}
                 disabled={!activeWorkspace}
                 className={`shrink-0 ml-2 p-1.5 rounded-lg bg-[var(--bg-primary)] transition-colors ${
@@ -705,6 +829,16 @@ function AppShell() {
                 </svg>
               </button>
             </header>
+
+            {/* Search palette — rendered inside the chat area so it doesn't
+                block the right-side preview panel. */}
+            <Suspense fallback={null}>
+              <SearchPalette
+                open={searchOpen}
+                onClose={() => setSearchOpen(false)}
+                onOpenPreview={(path) => handleOpenPreview({ kind: "file", path })}
+              />
+            </Suspense>
 
             {error && (
               <div className="shrink-0 px-4 py-2 bg-red-900/30 border-b border-red-800/50 text-red-300 text-xs flex items-center justify-between">
@@ -796,6 +930,12 @@ function AppShell() {
             defaultWorkspacePath={defaultWorkspacePath}
             onPickDefaultWorkspace={handlePickDefaultWorkspace}
             onResetDefaultWorkspace={handleResetDefaultWorkspace}
+            vaultPath={getConfig().vaultPath}
+            onPickVault={handlePickVault}
+            onResetVault={handleResetVault}
+            defaultVaultPath={defaultVaultPath}
+            onBackfill={handleBackfill}
+            backfillStatus={backfillStatus}
           />
           </Suspense>
         )}

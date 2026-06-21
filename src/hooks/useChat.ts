@@ -59,6 +59,69 @@ function findWorkspaceForConversation(
   return indexRef.current?.get(convId) ?? null;
 }
 
+/** Build a full markdown transcript from conversation messages.
+ *  Includes text, images (as Obsidian ![[embeds]]), tool calls, and thinking.
+ *  Skips system/empty messages. Optionally appends the final assistant text
+ *  (from agent-done) with dedup. */
+function buildTranscript(messages: Message[], finalAssistantText?: string): string {
+  const parts: string[] = [];
+  for (const msg of messages) {
+    if (msg.role === "system") continue;
+
+    const heading = msg.role === "user" ? "## User" : "## Assistant";
+    const subParts: string[] = [];
+
+    // Text content.
+    const text = msg.content.trim();
+    if (text) subParts.push(text);
+
+    // Images — embed as Obsidian wiki-link images.
+    if (msg.images?.length) {
+      const imageLines = msg.images.map((img) => {
+        const filename = img.split("/").pop() ?? img;
+        return `![[${filename}]]`;
+      });
+      subParts.push(imageLines.join("\n"));
+    }
+
+    // Tool calls.
+    if (msg.tools?.length) {
+      const toolLines = msg.tools.map((t) => {
+        let line = `> **🔧 ${t.name}**`;
+        if (t.rawInput) line += `\n> Input: \`${truncateStr(t.rawInput, 200)}\``;
+        else if (t.input) line += `\n> Input: \`${truncateStr(JSON.stringify(t.input), 200)}\``;
+        if (t.result) line += `\n> Result: ${truncateStr(t.result, 300)}`;
+        return line;
+      });
+      subParts.push(toolLines.join("\n\n"));
+    }
+
+    // Thinking content.
+    if (msg.thinking?.trim()) {
+      subParts.push(`<details>\n<summary>Thinking</summary>\n\n${msg.thinking.trim()}\n\n</details>`);
+    }
+
+    if (subParts.length === 0) continue;
+    parts.push(`${heading}\n\n${subParts.join("\n\n")}`);
+  }
+
+  // Append the final assistant text if it's not already the last message.
+  if (finalAssistantText?.trim()) {
+    const lastPart = parts[parts.length - 1];
+    const trimmed = finalAssistantText.trim();
+    if (!lastPart || !lastPart.endsWith(trimmed)) {
+      parts.push(`## Assistant\n\n${trimmed}`);
+    }
+  }
+
+  return parts.join("\n\n");
+}
+
+function truncateStr(s: string, max: number): string {
+  if (s.length <= max) return s;
+  return s.slice(0, max) + "…";
+}
+
 function patchConversation(
   prev: Record<string, Conversation[]>,
   convId: string,
@@ -602,6 +665,26 @@ export function useChat(engineModelConfigs: EngineModelConfigs) {
         });
         // Only clear the banner when the turn actually succeeded.
         setError(null);
+
+        // Fire-and-forget: write conversation to Obsidian vault.
+        {
+          const convId = done.conversation_id;
+          const wsId = findWorkspaceForConversation(allConversationsRef.current, convId, convIndexRef);
+          const conv = wsId ? allConversationsRef.current[wsId]?.find((c) => c.id === convId) : undefined;
+          if (conv) {
+            const vault = getConfig().vaultPath ?? null;
+            // Always invoke — backend falls back to <data_dir>/kb/ if vaultPath is null.
+            const transcript = buildTranscript(conv.messages, done.full_text);
+            invoke("summarize_conversation", {
+              conversationId: convId,
+              workspacePath: wsId ?? null,
+              title: conv.title ?? null,
+              vaultPath: vault,
+              engine: conv.engine ?? null,
+              transcript,
+            }).catch((e) => console.error("[kb] invoke failed:", e));
+          }
+        }
       });
 
       const u3 = await listen<ResponseError>("agent-error", (event) => {
