@@ -46,9 +46,12 @@ function generateId(): string {
 }
 
 function generateTitle(content: string): string {
-  const trimmed = content.trim().replace(/\n/g, " ");
-  if (trimmed.length <= 30) return trimmed;
-  return trimmed.slice(0, 27) + "...";
+  // Strip KB context block if present (injected by KB toggle in InputBar).
+  // The context is wrapped in <details>...</details> tags.
+  const stripped = content.replace(/^<details\b[\s\S]*?<\/details>\n*/, "").trim();
+  const cleaned = stripped.replace(/\n/g, " ");
+  if (cleaned.length <= 30) return cleaned;
+  return cleaned.slice(0, 27) + "...";
 }
 
 function findWorkspaceForConversation(

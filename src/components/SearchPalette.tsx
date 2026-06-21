@@ -18,7 +18,7 @@ export default function SearchPalette({ open, onClose, onOpenPreview }: SearchPa
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
-  const timerRef = useRef<ReturnType<typeof setTimeout>>();
+  const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   // Request serial number to discard stale responses.
   const seqRef = useRef(0);
 

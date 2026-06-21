@@ -299,6 +299,7 @@ function migrateFromLocalStorage(): { config: AppConfig; history: HistoryEntry[]
     workspaces,
     activeWorkspaceId: typeof data.activeWorkspaceId === "string" ? data.activeWorkspaceId : null,
     knownReadyEngines: [],
+    vaultPath: null,
   };
 
   return { config, history };
