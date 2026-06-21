@@ -119,12 +119,12 @@ export default function Settings({
                 engineStatuses.map((status) => {
                   const ready = status.available && status.auth_state === "ready";
                   const label = !status.available
-                    ? "未安装"
+                    ? "Not installed"
                     : ready
-                      ? "就绪"
+                      ? "Ready"
                       : status.auth_state === "unknown"
-                        ? "检测中…"
-                        : "未就绪";
+                        ? "Checking…"
+                        : "Not ready";
                   const dot = !status.available
                     ? "bg-red-400"
                     : ready
@@ -159,7 +159,7 @@ export default function Settings({
                   onClick={onOpenSetup}
                   className="px-3 py-1.5 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-xs font-medium transition-colors"
                 >
-                  配置引擎环境
+                  Configure
                 </button>
                 <button
                   onClick={handleRefresh}
