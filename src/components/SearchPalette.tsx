@@ -12,7 +12,12 @@ interface SearchPaletteProps {
   onOpenPreview: (path: string) => void;
 }
 
-export default function SearchPalette({ open, onClose, onOpenPreview }: SearchPaletteProps) {
+export default function SearchPalette(props: SearchPaletteProps) {
+  if (!props.open) return null;
+  return <SearchPaletteInner onClose={props.onClose} onOpenPreview={props.onOpenPreview} />;
+}
+
+function SearchPaletteInner({ onClose, onOpenPreview }: Omit<SearchPaletteProps, "open">) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<KbSearchResult[]>([]);
   const [loading, setLoading] = useState(false);
@@ -22,29 +27,21 @@ export default function SearchPalette({ open, onClose, onOpenPreview }: SearchPa
   // Request serial number to discard stale responses.
   const seqRef = useRef(0);
 
-  // Reset state when the palette opens.
+  // Focus the input on mount.
   useEffect(() => {
-    if (open) {
-      setQuery("");
-      setResults([]);
-      setSelected(0);
-      seqRef.current = 0;
-      setTimeout(() => inputRef.current?.focus(), 0);
-    }
-  }, [open]);
+    const t = setTimeout(() => inputRef.current?.focus(), 0);
+    return () => clearTimeout(t);
+  }, []);
 
   // Debounced search — fires 350 ms after the user stops typing.
   useEffect(() => {
     if (timerRef.current) clearTimeout(timerRef.current);
 
-    if (!open || query.trim().length < 2) {
-      setResults([]);
-      setLoading(false);
+    if (query.trim().length < 2) {
       return;
     }
 
     const seq = ++seqRef.current;
-    setLoading(true);
 
     timerRef.current = setTimeout(async () => {
       try {
@@ -69,7 +66,7 @@ export default function SearchPalette({ open, onClose, onOpenPreview }: SearchPa
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
-  }, [query, open]);
+  }, [query]);
 
   // Keyboard navigation.
   const handleKeyDown = useCallback(
@@ -98,8 +95,6 @@ export default function SearchPalette({ open, onClose, onOpenPreview }: SearchPa
     [results, selected, onClose, onOpenPreview],
   );
 
-  if (!open) return null;
-
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center pt-[12vh]">
       {/* Backdrop — subtle dim, click to close */}
@@ -126,7 +121,22 @@ export default function SearchPalette({ open, onClose, onOpenPreview }: SearchPa
             ref={inputRef}
             type="text"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => {
+              const next = e.target.value;
+              setQuery(next);
+              setSelected(0);
+
+              if (timerRef.current) clearTimeout(timerRef.current);
+
+              if (next.trim().length < 2) {
+                // Cancel any in-flight requests and clear the list immediately.
+                seqRef.current++;
+                setResults([]);
+                setLoading(false);
+              } else {
+                setLoading(true);
+              }
+            }}
             onKeyDown={handleKeyDown}
             placeholder="Search knowledge base…"
             className="flex-1 bg-transparent text-sm text-[var(--text-primary)] placeholder-[var(--text-secondary)] outline-none"

@@ -639,6 +639,24 @@ function AppShell() {
     }
   }, []);
 
+  function stripHtmlTags(input: string): string {
+    return input.replace(/<\/?[^>]+>/g, " ");
+  }
+
+  function sanitizeKbText(input: string, maxChars: number): string {
+    let s = input ?? "";
+    // Remove nested KB context blocks (e.g. when a note contains copied Pixie prompts).
+    s = s.replace(/<details\b[\s\S]*?<\/details>/gi, " ");
+    // Remove any remaining HTML tags so they can't break our lightweight parser.
+    s = stripHtmlTags(s);
+    // Drop Obsidian embed syntax (images/PDFs/etc.) which is noisy in previews.
+    s = s.replace(/!\[\[[^\]]+?\]\]/g, " ");
+    // Collapse whitespace so the HTML wrapper stays single-line and regex-friendly.
+    s = s.replace(/\s+/g, " ").trim();
+    if (s.length > maxChars) s = s.slice(0, maxChars) + " …";
+    return s;
+  }
+
   const handleOpenObsidian = useCallback(async () => {
     try {
       const installed = await invoke<boolean>("check_obsidian_installed");
@@ -671,8 +689,12 @@ function AppShell() {
     const entries = results
       .slice(0, 3)
       .map(
-        (r, i) =>
-          `<div class="kb-entry"><strong>${i + 1}. ${r.title}</strong> (${r.created?.split("T")[0] ?? "unknown date"})<br>${r.snippet}</div>`,
+        (r, i) => {
+          const title = sanitizeKbText(r.title ?? "Untitled", 120);
+          const date = sanitizeKbText(r.created?.split("T")[0] ?? "unknown date", 40);
+          const snippet = sanitizeKbText(r.snippet ?? "", 800);
+          return `<div class="kb-entry"><strong>${i + 1}. ${title}</strong> (${date})<br>${snippet}</div>`;
+        },
       )
       .join("\n");
     return `\

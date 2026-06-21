@@ -374,25 +374,20 @@ body {
 }
 
 /* Collapsible KB context in user messages */
-.user-msg-details summary {
-  cursor: pointer;
-  font-size: 0.75rem;
-  color: var(--text-secondary);
-  opacity: 0.8;
-  padding: 2px 0;
-  outline: none;
-}
-.user-msg-details[open] summary {
-  margin-bottom: 0.5rem;
-  opacity: 1;
-}
-.user-msg-details .kb-entry {
+.kb-entry {
   margin-bottom: 0.5rem;
   padding-left: 0.5rem;
   border-left: 2px solid var(--border-color);
   font-size: 0.75rem;
   color: var(--text-secondary);
   line-height: 1.4;
+}
+
+.kb-entry-snippet {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+  overflow: hidden;
 }
 
 /* -------------------------------------------------------------------------- */
