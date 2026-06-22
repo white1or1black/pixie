@@ -47,6 +47,15 @@ pub async fn summarize_with_guard(input: SummarizeInput) -> Result<()> {
         _ => crate::default_vault_dir(),
     };
 
+    // Ensure the vault directory has Obsidian metadata (.obsidian/) so the
+    // folder is a recognizable vault even if the user has never clicked
+    // "Open in Obsidian".  Failures are logged but never block note writes.
+    if let Some(p) = vault_path.to_str() {
+        if let Err(e) = crate::ensure_obsidian_vault(p) {
+            log::warn!("[kb] ensure_obsidian_vault failed: {e}");
+        }
+    }
+
     // Dedup check: skip if already writing this conv.
     {
         let mut set = INFLIGHT.lock().await;

@@ -562,7 +562,13 @@ function AppShell() {
   const handlePickVault = useCallback(async () => {
     try {
       const path = await invoke<string | null>("pick_folder");
-      if (path) updateConfig({ vaultPath: path });
+      if (path) {
+        updateConfig({ vaultPath: path });
+        // Immediately initialize .obsidian/ metadata so the folder is a
+        // valid Obsidian vault right away — no need to wait for the first
+        // conversation or "Open in Obsidian" click.
+        invoke("initialize_kb_vault", { vaultPath: path }).catch(() => {});
+      }
     } catch { /* ignore */ }
   }, []);
   const handleResetVault = useCallback(() => {

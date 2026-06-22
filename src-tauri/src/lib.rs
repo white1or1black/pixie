@@ -1869,6 +1869,23 @@ async fn get_default_vault_path(_app: AppHandle) -> Result<Option<String>, Strin
     Ok(Some(kb.to_string_lossy().into_owned()))
 }
 
+/// Initialize a knowledge-base vault directory — ensures `.obsidian/` metadata
+/// exists so the folder is recognized as an Obsidian vault.  Call this when the
+/// user changes the vault path in Settings, so the vault is ready before they
+/// first click "Open in Obsidian" or save a conversation.
+#[tauri::command]
+async fn initialize_kb_vault(vault_path: Option<String>) -> Result<(), String> {
+    let path = match vault_path.as_deref() {
+        Some(p) if !p.trim().is_empty() => p.to_string(),
+        _ => default_vault_dir().to_string_lossy().into_owned(),
+    };
+    // Create the vault directory if it doesn't exist yet.
+    let _ = fs::create_dir_all(&path);
+    // Write .obsidian/ metadata.
+    ensure_obsidian_vault(&path)?;
+    Ok(())
+}
+
 /// Open the vault's Pixie/ subdirectory in the system file manager.
 #[tauri::command]
 async fn open_vault_folder(_app: AppHandle, vault_path: Option<String>) -> Result<(), String> {
@@ -1948,29 +1965,13 @@ async fn open_vault_in_obsidian(vault_path: Option<String>) -> Result<(), String
         Some(p) if !p.trim().is_empty() => p.to_string(),
         _ => default_vault_dir().to_string_lossy().into_owned(),
     };
-    let vault = PathBuf::from(&vault_path);
 
     // 1. Ensure .obsidian/ exists so Obsidian recognizes this as a valid vault.
-    let obsidian_dir = vault.join(".obsidian");
-    fs::create_dir_all(&obsidian_dir).map_err(|e| format!("Cannot create .obsidian: {e}"))?;
-
-    let vault_name = vault
+    ensure_obsidian_vault(&vault_path)?;
+    let vault_name = PathBuf::from(&vault_path)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "Pixie".to_string());
-
-    // Write app.json if missing.
-    let app_json = obsidian_dir.join("app.json");
-    if !app_json.exists() {
-        fs::write(&app_json, format!("{{\"vaultName\":\"{vault_name}\"}}"))
-            .map_err(|e| format!("Cannot write app.json: {e}"))?;
-    }
-    // Also create appearance.json to prevent Obsidian from showing a
-    // "this vault needs to be upgraded" prompt on first open.
-    let appearance_json = obsidian_dir.join("appearance.json");
-    if !appearance_json.exists() {
-        fs::write(&appearance_json, "{}").ok();
-    }
 
     // 2. Register the vault in Obsidian's vault list.
     register_vault_in_obsidian(&vault_path, &vault_name).await?;
@@ -2005,6 +2006,32 @@ async fn open_vault_in_obsidian(vault_path: Option<String>) -> Result<(), String
     Ok(())
 }
 
+/// Ensure the vault directory has `.obsidian/` metadata so Obsidian recognizes
+/// it as a valid vault.  Idempotent — safe to call multiple times; creates
+/// `app.json` and `appearance.json` only when missing.
+pub(crate) fn ensure_obsidian_vault(vault_path: &str) -> Result<(), String> {
+    let vault = PathBuf::from(vault_path);
+    let obsidian_dir = vault.join(".obsidian");
+    fs::create_dir_all(&obsidian_dir)
+        .map_err(|e| format!("Cannot create .obsidian: {e}"))?;
+
+    let vault_name = vault
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Pixie".to_string());
+
+    let app_json = obsidian_dir.join("app.json");
+    if !app_json.exists() {
+        fs::write(&app_json, format!("{{\"vaultName\":\"{vault_name}\"}}"))
+            .map_err(|e| format!("Cannot write app.json: {e}"))?;
+    }
+    let appearance_json = obsidian_dir.join("appearance.json");
+    if !appearance_json.exists() {
+        fs::write(&appearance_json, "{}").ok();
+    }
+    Ok(())
+}
+
 /// Read Obsidian's vault registry (`obsidian.json`), add our vault if it's
 /// not already listed, and write the updated config back.
 async fn register_vault_in_obsidian(vault_path: &str, _vault_name: &str) -> Result<(), String> {
@@ -2029,11 +2056,27 @@ async fn register_vault_in_obsidian(vault_path: &str, _vault_name: &str) -> Resu
         .join("obsidian")
         .join("obsidian.json");
 
-    // If obsidian.json doesn't exist, Obsidian may not be installed / never
-    // launched.  Skip registration — the `open` command will still launch
-    // Obsidian; the user may need to open the vault manually the first time.
+    // If obsidian.json doesn't exist (Obsidian never launched), create the
+    // config directory and a minimal registry with our vault.  This avoids the
+    // "vault not found" error that would otherwise occur when we try to open
+    // via obsidian://open?vault=<name> without a registration entry.
     if !obsidian_config.exists() {
-        log::warn!("obsidian.json not found at {}", obsidian_config.display());
+        if let Some(parent) = obsidian_config.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let vault_id = &uuid::Uuid::new_v4().to_string()[..16];
+        let entry = serde_json::json!({
+            "path": vault_path,
+            "ts": chrono::Utc::now().timestamp(),
+        });
+        let config = serde_json::json!({
+            "vaults": { vault_id: entry }
+        });
+        let content = serde_json::to_string_pretty(&config)
+            .map_err(|e| format!("Cannot serialize obsidian.json: {e}"))?;
+        atomic_write(&obsidian_config, &content)
+            .map_err(|e| format!("Cannot create obsidian.json: {e}"))?;
+        log::info!("[obsidian] created obsidian.json with vault registration");
         return Ok(());
     }
 
@@ -2955,6 +2998,7 @@ pub fn run() {
             list_task_runs,
             summarize_conversation,
             get_default_vault_path,
+            initialize_kb_vault,
             open_vault_folder,
             open_vault_in_obsidian,
             check_obsidian_installed,
