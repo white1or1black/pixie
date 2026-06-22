@@ -1973,33 +1973,43 @@ async fn open_vault_in_obsidian(vault_path: Option<String>) -> Result<(), String
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "Pixie".to_string());
 
-    // 2. Register the vault in Obsidian's vault list.
+    // 2. Register the vault in Obsidian's vault list so it appears in the
+    // vault switcher even after a restart.
     register_vault_in_obsidian(&vault_path, &vault_name).await?;
 
-    // 3. Open using the vault name (now registered).
-    let url = format!(
-        "obsidian://open?vault={}",
-        urlencoding::encode(&vault_name),
-    );
-
+    // 3. Open the vault folder directly with Obsidian (by path, not by name).
+    //    The obsidian://open?vault=<name> URL scheme relies on Obsidian's
+    //    in-memory vault cache which may be stale if Obsidian is already
+    //    running.  Opening the folder path directly is more reliable.
     #[cfg(target_os = "macos")]
     {
         tokio::process::Command::new("open")
-            .arg(&url)
+            .arg(&vault_path)
+            .arg("-a")
+            .arg("Obsidian")
             .spawn()
             .map_err(|e| format!("Failed to open Obsidian: {e}"))?;
     }
     #[cfg(target_os = "windows")]
     {
-        tokio::process::Command::new("cmd")
-            .args(["/c", "start", "", &url])
+        // On Windows, use Obsidian's executable path to open the vault folder.
+        let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        let obsidian_exe = PathBuf::from(&local).join("Obsidian").join("Obsidian.exe");
+        let fallback = PathBuf::from("C:\\Program Files\\Obsidian\\Obsidian.exe");
+        let exe = if obsidian_exe.exists() {
+            obsidian_exe
+        } else {
+            fallback
+        };
+        tokio::process::Command::new(exe.to_string_lossy().as_ref())
+            .arg(&vault_path)
             .spawn()
             .map_err(|e| format!("Failed to open Obsidian: {e}"))?;
     }
     #[cfg(target_os = "linux")]
     {
-        tokio::process::Command::new("xdg-open")
-            .arg(&url)
+        tokio::process::Command::new("obsidian")
+            .arg(&vault_path)
             .spawn()
             .map_err(|e| format!("Failed to open Obsidian: {e}"))?;
     }
