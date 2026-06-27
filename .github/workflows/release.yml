@@ -130,4 +130,7 @@ jobs:
           releaseDraft: true
           prerelease: ${{ env.PRERELEASE }}
           updaterJsonPreferNsis: true
-          args: ${{ matrix.args }}
+          # Windows MSI rejects prerelease versions (e.g. 0.8.0-beta.1 — MSI
+          # needs numeric-only). For prereleases, build Windows as NSIS only
+          # (the updater already prefers NSIS anyway). Stable keeps MSI+NSIS.
+          args: ${{ (matrix.platform == 'windows-latest' && env.PRERELEASE == 'true') && '--bundles nsis' || matrix.args }}
