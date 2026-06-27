@@ -47,6 +47,7 @@ jobs:
         # A tag like app-v0.8.0-beta.1 → version "0.8.0-beta.1" → prerelease.
         # Stable users pull from /releases/latest/... which never resolves to a
         # GitHub prerelease, so betas never reach the stable channel.
+        shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#app-v}"
           if [[ "$VERSION" == *-* ]]; then
@@ -107,6 +108,7 @@ jobs:
         run: pnpm install
 
       - name: Determine release channel
+        shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#app-v}"
           if [[ "$VERSION" == *-* ]]; then
