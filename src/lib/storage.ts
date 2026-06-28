@@ -138,7 +138,7 @@ interface ConfigWire {
 }
 
 function isValidEngine(v: unknown): v is AgentEngineId {
-  return v === "claude" || v === "cursor" || v === "codebuddy";
+  return v === "claude" || v === "cursor" || v === "codebuddy" || v === "builtin";
 }
 
 /** Coerce a persisted `known_ready_engines` blob into a valid engine-id list. */
@@ -154,12 +154,14 @@ function coerceEngineModelConfigs(raw: unknown): EngineModelConfigs {
       claude: { ...DEFAULT_ENGINE_MODEL_CONFIGS.claude, ...r.claude },
       cursor: { ...DEFAULT_ENGINE_MODEL_CONFIGS.cursor, ...r.cursor },
       codebuddy: { ...DEFAULT_ENGINE_MODEL_CONFIGS.codebuddy, ...r.codebuddy },
+      builtin: { ...DEFAULT_ENGINE_MODEL_CONFIGS.builtin, ...r.builtin },
     };
   }
   return {
     claude: { ...DEFAULT_ENGINE_MODEL_CONFIGS.claude },
     cursor: { ...DEFAULT_ENGINE_MODEL_CONFIGS.cursor },
     codebuddy: { ...DEFAULT_ENGINE_MODEL_CONFIGS.codebuddy },
+    builtin: { ...DEFAULT_ENGINE_MODEL_CONFIGS.builtin },
   };
 }
 

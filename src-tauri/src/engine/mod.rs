@@ -3,6 +3,7 @@ pub mod codebuddy;
 pub mod cursor;
 pub mod persistent;
 pub(crate) mod shared;
+pub mod builtin;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -23,13 +24,14 @@ pub use shared::{
 /// 1. Add its id here and in `engine_display_name`.
 /// 2. Create `engine/<name>.rs` with `check_available`, `spawn_*`, `parse_line`.
 /// 3. Wire dispatch in `check_engine`, `spawn_single`, `spawn_continue`, `parse_line`.
-pub const ENGINE_IDS: &[&str] = &["claude", "cursor", "codebuddy"];
+pub const ENGINE_IDS: &[&str] = &["claude", "cursor", "codebuddy", "builtin"];
 
 pub fn normalize_engine_id(id: &str) -> Result<&'static str> {
     match id {
         "claude" => Ok("claude"),
         "cursor" => Ok("cursor"),
         "codebuddy" => Ok("codebuddy"),
+        "builtin" => Ok("builtin"),
         other => anyhow::bail!("unknown engine: {other}"),
     }
 }
@@ -39,6 +41,7 @@ pub fn engine_display_name(id: &str) -> &'static str {
         "claude" => "Claude Code",
         "cursor" => "Cursor Agent",
         "codebuddy" => "CodeBuddy",
+        "builtin" => builtin::engine_display_name(),
         _ => "Unknown",
     }
 }
@@ -245,6 +248,8 @@ pub fn parse_line(engine_id: &str, line: &str) -> Vec<NormalizedEvent> {
         "claude" => claude::parse_line(line),
         "codebuddy" => codebuddy::parse_line(line),
         "cursor" => cursor::parse_line(line),
+        // Builtin engine doesn't use NDJSON — it emits events directly via channel
+        "builtin" => vec![],
         _ => vec![],
     }
 }
@@ -255,6 +260,7 @@ pub async fn check_engine(id: &str) -> EngineStatus {
         "claude" => claude::check_available().await,
         "codebuddy" => codebuddy::check_available().await,
         "cursor" => cursor::check_available().await,
+        "builtin" => builtin::check_available().await,
         _ => EngineStatus::basic(
             id,
             display_name,
@@ -456,6 +462,8 @@ pub async fn probe_engine(id: &str) -> EngineStatus {
         "claude" => claude::spawn_probe().await,
         "codebuddy" => codebuddy::spawn_probe().await,
         "cursor" => cursor::spawn_probe().await,
+        // Builtin engine probe is handled differently (no child process)
+        "builtin" => return builtin_probe(id).await,
         other => Err(anyhow::anyhow!("unknown engine: {other}")),
     };
     let outcome = match child {
@@ -467,6 +475,19 @@ pub async fn probe_engine(id: &str) -> EngineStatus {
     };
     status.auth_state = outcome.state;
     status.probe_error = outcome.error;
+    status
+}
+
+/// Probe the builtin engine by making a minimal API call to Anthropic.
+async fn builtin_probe(id: &str) -> EngineStatus {
+    let mut status = check_engine(id).await;
+    if !status.available {
+        return status;
+    }
+    // For the builtin engine, "available" means the API key is set.
+    // A real probe would make a tiny API call, but for now we just
+    // mark it as Ready since we already checked the API key exists.
+    status.auth_state = AuthState::Ready;
     status
 }
 
@@ -493,6 +514,8 @@ pub fn install_command(id: &str) -> Result<&'static str> {
         "claude" => "npm install -g @anthropic-ai/claude-code",
         "codebuddy" => "npm install -g @tencent-ai/codebuddy-code",
         "cursor" => "curl https://cursor.com/install -fsS | bash",
+        // Builtin engine is built-in, no install needed
+        "builtin" => "(built-in, no installation required)",
         other => anyhow::bail!("unknown engine: {other}"),
     })
 }
@@ -555,6 +578,7 @@ pub async fn list_models(engine_id: &str) -> Vec<(String, String)> {
         "claude" => claude::list_models().await,
         "codebuddy" => codebuddy::list_models().await,
         "cursor" => cursor::list_models().await,
+        "builtin" => builtin::list_models().await,
         _ => vec![],
     }
 }
@@ -570,6 +594,8 @@ pub async fn spawn_single(
         "claude" => claude::spawn_single(session_id, message, cwd, model).await,
         "codebuddy" => codebuddy::spawn_single(session_id, message, cwd, model).await,
         "cursor" => cursor::spawn_single(session_id, message, cwd, model).await,
+        // Builtin engine doesn't spawn child processes
+        "builtin" => anyhow::bail!("builtin engine does not use process spawning"),
         other => anyhow::bail!("unknown engine: {other}"),
     }
 }
@@ -585,6 +611,7 @@ pub async fn spawn_headless(
     match engine_id {
         "claude" => claude::spawn_headless(session_id, message, cwd).await,
         // CodeBuddy/Cursor fall back to their regular spawn_single for now.
+        // Builtin engine doesn't spawn child processes (handled separately)
         other => spawn_single(other, session_id, message, cwd, None).await,
     }
 }
@@ -600,6 +627,8 @@ pub async fn spawn_continue(
         "claude" => claude::spawn_continue(session_id, message, cwd, model).await,
         "codebuddy" => codebuddy::spawn_continue(session_id, message, cwd, model).await,
         "cursor" => cursor::spawn_continue(session_id, message, cwd, model).await,
+        // Builtin engine doesn't spawn child processes
+        "builtin" => anyhow::bail!("builtin engine does not use process spawning"),
         other => anyhow::bail!("unknown engine: {other}"),
     }
 }

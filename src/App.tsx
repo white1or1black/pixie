@@ -85,6 +85,12 @@ const ENGINE_SETUP_INFO: Record<
     loginHint: "选择登录方式，浏览器完成认证",
     docs: "https://www.codebuddy.ai/docs/cli/quickstart",
   },
+  builtin: {
+    install: "（内置引擎，无需安装）",
+    login: "",
+    loginHint: "在设置页面配置 ANTHROPIC_API_KEY 即可使用",
+    docs: "https://docs.anthropic.com/en/api",
+  },
 };
 
 function CommandRow({ command, label }: { command: string; label: string }) {
@@ -127,12 +133,13 @@ function EngineCard({
   onLogin: (id: AgentEngineId) => void;
   onInstall: (id: AgentEngineId) => Promise<{ success: boolean; output: string }>;
 }) {
+  const isBuiltin = engineId === "builtin";
   const info = ENGINE_SETUP_INFO[engineId];
-  const installed = !!status?.available;
+  const installed = isBuiltin || !!status?.available;
   const authState: AuthState = status?.auth_state ?? "unknown";
   const ready = installed && authState === "ready";
   const notReady = installed && !ready;
-  const probing = installed && authState === "unknown";
+  const probing = installed && authState === "unknown" && (!isBuiltin || !!status?.available);
   const [installing, setInstalling] = useState(false);
   const [installError, setInstallError] = useState<string | null>(null);
 
@@ -154,7 +161,7 @@ function EngineCard({
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2 min-w-0">
           <span className="text-sm font-semibold text-[var(--text-primary)] truncate">{label}</span>
-          {installed && status?.version && (
+          {!isBuiltin && installed && status?.version && (
             <span className="text-[10px] text-[var(--text-secondary)] shrink-0">v{status.version}</span>
           )}
         </div>
@@ -166,7 +173,7 @@ function EngineCard({
                 : "text-amber-400 bg-amber-500/10"
             }`}
           >
-            {ready ? "就绪" : probing ? "检测中…" : "未就绪"}
+            {isBuiltin ? "内置" : ready ? "就绪" : probing ? "检测中…" : "未就绪"}
           </span>
         ) : (
           <span className="text-xs font-medium px-2 py-0.5 rounded-full text-[var(--text-secondary)] bg-[var(--bg-tertiary)] shrink-0">
@@ -175,7 +182,24 @@ function EngineCard({
         )}
       </div>
 
-      {!installed && (
+      {isBuiltin && notReady && !probing && (
+        <div className="space-y-2">
+          <p className="text-xs text-amber-400">
+            请在设置页面 → 引擎配置 → Builtin 中配置 ANTHROPIC_API_KEY。
+          </p>
+          <p className="text-[11px] text-[var(--text-secondary)]">
+            内置引擎直接调用 Anthropic Messages API，无需安装 CLI，只需配置 API Key。
+          </p>
+          <button
+            onClick={() => onProbe(engineId)}
+            className="px-3 py-1.5 rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-primary)] text-xs font-medium transition-colors hover:opacity-80"
+          >
+            重新检测
+          </button>
+        </div>
+      )}
+
+      {!isBuiltin && !installed && (
         <div className="space-y-2">
           <div className="flex items-center gap-2">
             <button
@@ -212,7 +236,7 @@ function EngineCard({
 
       {ready && <p className="text-xs text-emerald-400">已就绪，可以使用。</p>}
 
-      {notReady && !probing && (
+      {!isBuiltin && notReady && !probing && (
         <div className="space-y-2">
           <p className="text-xs text-amber-400">未就绪。点「一键登录」在浏览器登录，完成后点「重新检测」。</p>
           <div className="flex gap-2">

@@ -57,13 +57,14 @@ export interface Conversation {
   model?: string;
 }
 
-export type AgentEngineId = "claude" | "cursor" | "codebuddy";
+export type AgentEngineId = "claude" | "cursor" | "codebuddy" | "builtin";
 
 /** Env key that each engine uses for its model override in global config. */
 export const ENGINE_MODEL_ENV_KEY: Record<AgentEngineId, string> = {
   claude: "ANTHROPIC_MODEL",
   cursor: "CURSOR_MODEL",
   codebuddy: "CODEBUDDY_MODEL",
+  builtin: "ANTHROPIC_MODEL",
 };
 
 /** A model entry returned by the backend's list_models command. */
@@ -76,6 +77,7 @@ export const AGENT_ENGINES: { id: AgentEngineId; label: string }[] = [
   { id: "claude", label: "Claude Code" },
   { id: "cursor", label: "Cursor Agent" },
   { id: "codebuddy", label: "CodeBuddy" },
+  { id: "builtin", label: "Builtin" },
 ];
 
 /** Readiness/auth state of an engine, set by the backend probe. Mirrors the
@@ -197,11 +199,21 @@ export interface CodebuddyModelConfig {
   CODEBUDDY_MODEL?: string;
 }
 
+export interface BuiltinModelConfig {
+  /** Shared with Claude engine — Anthropic API key */
+  ANTHROPIC_API_KEY?: string;
+  /** Custom Anthropic API base URL */
+  ANTHROPIC_BASE_URL?: string;
+  /** Model override for builtin engine */
+  ANTHROPIC_MODEL?: string;
+}
+
 /** Per-engine model/env overrides. */
 export type EngineModelConfigs = {
   claude: ClaudeModelConfig;
   cursor: CursorModelConfig;
   codebuddy: CodebuddyModelConfig;
+  builtin: BuiltinModelConfig;
 };
 
 /** @deprecated Use EngineModelConfigs */
@@ -211,6 +223,7 @@ export const DEFAULT_ENGINE_MODEL_CONFIGS: EngineModelConfigs = {
   claude: {},
   cursor: {},
   codebuddy: {},
+  builtin: {},
 };
 
 export const ENGINE_MODEL_FIELDS: Record<
@@ -232,6 +245,11 @@ export const ENGINE_MODEL_FIELDS: Record<
     { key: "CURSOR_MODEL", label: "Model" },
   ],
   codebuddy: [{ key: "CODEBUDDY_MODEL", label: "Model" }],
+  builtin: [
+    { key: "ANTHROPIC_API_KEY", label: "API Key", secret: true },
+    { key: "ANTHROPIC_BASE_URL", label: "Base URL" },
+    { key: "ANTHROPIC_MODEL", label: "Model" },
+  ],
 };
 
 export interface FileEntry {

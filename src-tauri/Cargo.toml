@@ -42,3 +42,10 @@ base64 = "0.22"
 urlencoding = "2"
 # Chinese word segmentation for CJK search tokenization.
 jieba-rs = "0.10"
+# HTTP client for builtin engine (Anthropic Messages API SSE streaming).
+reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
+futures-util = "0.3"
+async-trait = "0.1"
+tokio-util = "0.7"
+# Builtin engine: in-process agent loop via the pixie-pi library crate.
+pixie-pi = { git = "https://github.com/white1or1black/pixie-pi", tag = "v0.1.0" }

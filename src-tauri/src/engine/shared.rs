@@ -63,6 +63,21 @@ pub fn set_model_config_overrides(config: HashMap<String, String>) {
     set_engine_model_config("claude", config);
 }
 
+/// Get a single config value for an engine by key.
+/// Returns None if the key is not set or the value is empty.
+pub fn get_model_config_value(engine: &str, key: &str) -> Option<String> {
+    if let Ok(guard) = get_model_configs().lock() {
+        if let Some(overrides) = guard.get(engine) {
+            if let Some(v) = overrides.get(key) {
+                if !v.is_empty() {
+                    return Some(v.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
 fn apply_engine_model_config_overrides(engine: &str, env: &mut HashMap<String, String>) {
     if let Ok(guard) = get_model_configs().lock() {
         if let Some(overrides) = guard.get(engine) {
