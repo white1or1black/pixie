@@ -49,6 +49,7 @@ const EMPTY_CONFIG: AppConfig = {
     claude: { ...DEFAULT_ENGINE_MODEL_CONFIGS.claude },
     cursor: { ...DEFAULT_ENGINE_MODEL_CONFIGS.cursor },
     codebuddy: { ...DEFAULT_ENGINE_MODEL_CONFIGS.codebuddy },
+    builtin: { ...DEFAULT_ENGINE_MODEL_CONFIGS.builtin },
   },
   workspaces: [],
   activeWorkspaceId: null,

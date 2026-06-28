@@ -69,6 +69,7 @@ export default function Settings({
     claude: false,
     cursor: false,
     codebuddy: false,
+    builtin: false,
   });
   const updater = useUpdater();
   const [appVersion, setAppVersion] = useState("");
