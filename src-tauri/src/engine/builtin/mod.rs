@@ -327,6 +327,21 @@ fn resolve_builtin_model(model: Option<&str>, base_url: Option<&str>) -> Model {
     };
     if let Some(url) = base_url {
         if !url.is_empty() {
+            // Check URL protocol and provide appropriate guidance
+            // Both HTTP and HTTPS are now supported (native-tls)
+            if url.starts_with("http://") {
+                log::warn!(
+                    "[builtin] ⚠️  Using HTTP protocol: {}",
+                    url
+                );
+                log::warn!("[builtin] HTTP is insecure - API keys and data will be sent unencrypted");
+                log::warn!("[builtin] Only use HTTP for local development/testing, never in production");
+                log::warn!("[builtin] For production, always use HTTPS (https://{})", &url[7..]);
+            } else if url.starts_with("https://") {
+                log::info!("[builtin] ✅ Using HTTPS protocol: {}", url);
+            } else {
+                log::warn!("[builtin] ⚠️  Unknown URL protocol: {}", url);
+            }
             resolved.base_url = url.to_string();
         }
     }

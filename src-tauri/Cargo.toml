@@ -47,7 +47,9 @@ regex = "1"
 # URL parsing for the beta-channel update endpoint override.
 url = "2"
 # HTTP client for builtin engine (Anthropic Messages API SSE streaming).
-reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
+# Changed from rustls-tls to native-tls to support both HTTP and HTTPS protocols,
+# maintaining compatibility with Claude Code CLI which supports HTTP.
+reqwest = { version = "0.12", features = ["stream", "json", "native-tls"] }
 futures-util = "0.3"
 async-trait = "0.1"
 tokio-util = "0.7"
