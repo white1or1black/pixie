@@ -7,6 +7,7 @@ use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone, Utc};
 use engine::persistent::{
     self as ps, read_persistent_turn, PersistentSession, SessionMap, IDLE_TIMEOUT, MAX_SESSIONS,
 };
+use engine::builtin::{BuiltinSession, BuiltinSessionMap, init_builtin_sessions};
 use engine::{
     bind_conversation_engine, check_all_engines, conversation_engine_id,
     init_conversation_engine_map, normalize_engine_id, read_child_stream, remember_session_id,
@@ -371,6 +372,12 @@ type ProcessMap = Arc<Mutex<HashMap<String, SharedAgentProcess>>>;
 /// conversation_id → child pid, so stop_generation can kill the running agent
 /// process without contending for the streaming task's lock.
 type KillRegistry = Arc<Mutex<HashMap<String, u32>>>;
+/// conversation_ids whose current persistent turn was intentionally stopped
+/// (via `stop_generation` or a mid-stream model change). Lets the streaming
+/// task tell a deliberate stop apart from a crash: a stopped turn finalizes
+/// silently instead of emitting "persistent session stdout closed unexpectedly"
+/// and tearing down any session a follow-up message just respawned.
+type StoppedSet = Arc<Mutex<HashSet<String>>>;
 
 pub struct AppState {
     /// Per-conversation agent processes for parallel execution
@@ -385,6 +392,10 @@ pub struct AppState {
     kill_registry: KillRegistry,
     /// Persistent (long-lived) sessions for Claude/CodeBuddy
     sessions: SessionMap,
+    /// Builtin engine sessions (in-process agent loop)
+    builtin_sessions: BuiltinSessionMap,
+    /// Conversations whose current persistent turn was deliberately stopped.
+    stopped_convs: StoppedSet,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -602,6 +613,96 @@ async fn send_message(
     // image content blocks; Cursor (no stream-json stdin) gets them as @mentions.
     let images_owned = images.unwrap_or_default();
 
+    // --- Builtin engine path (in-process agent loop) ---
+    if engine_id == "builtin" {
+        let builtin_sessions = state.builtin_sessions.clone();
+        let app_handle = app.clone();
+        let conv_id = conversation_id.clone();
+        let message_owned = message.clone();
+        let images_for_builtin = images_owned.clone();
+        let workspace_owned = workspace.clone();
+        let model_owned = model.clone();
+
+        tokio::spawn(async move {
+            // Get or create a builtin session
+            let mut sessions = builtin_sessions.lock().await;
+            let needs_create = !sessions.contains_key(&conv_id);
+            if needs_create {
+                let api_key = engine::builtin::get_api_key();
+                if api_key.is_empty() {
+                    let _ = app_handle.emit(
+                        "agent-error",
+                        ResponseError {
+                            conversation_id: conv_id.clone(),
+                            error: "No ANTHROPIC_API_KEY configured for builtin engine".to_string(),
+                        },
+                    );
+                    return;
+                }
+                let base_url = engine::builtin::get_base_url();
+                let cwd = workspace_owned.as_deref().unwrap_or(".");
+                let session = BuiltinSession::new(
+                    &conv_id,
+                    model_owned.as_deref(),
+                    None, // system_prompt: not yet wired
+                    cwd,
+                    &api_key,
+                    base_url.as_deref(),
+                );
+                sessions.insert(conv_id.clone(), session);
+            }
+
+            // Run the turn, emitting each event to the frontend IN REAL TIME via
+            // the closure (not buffered in a channel) — so streaming deltas
+            // appear as they arrive. The session lock is held for the turn.
+            let mut last_thinking: u64 = 0;
+            let result = {
+                let session = sessions.get_mut(&conv_id).unwrap();
+                let app_h = app_handle.clone();
+                let conv_c = conv_id.clone();
+                session
+                    .run_turn(&message_owned, &images_for_builtin, |evt| {
+                        emit_agent_events(&app_h, &conv_c, &[evt], &mut last_thinking);
+                    })
+                    .await
+            };
+
+            // Release the session lock.
+            drop(sessions);
+
+            match result {
+                Ok((final_text, had_error)) => {
+                    log::info!(
+                        "[send_message] builtin done, total_len={}, had_error={}",
+                        final_text.len(),
+                        had_error
+                    );
+                    if !had_error {
+                        let _ = app_handle.emit(
+                            "agent-done",
+                            ResponseDone {
+                                conversation_id: conv_id.clone(),
+                                full_text: final_text,
+                            },
+                        );
+                    }
+                }
+                Err(e) => {
+                    log::error!("[send_message] builtin error: {}", e);
+                    let _ = app_handle.emit(
+                        "agent-error",
+                        ResponseError {
+                            conversation_id: conv_id.clone(),
+                            error: e.to_string(),
+                        },
+                    );
+                }
+            }
+        });
+
+        return Ok(());
+    }
+
     // --- Persistent session path (Claude / CodeBuddy) ---
     if engine_id == "claude" || engine_id == "codebuddy" {
         let sessions = state.sessions.clone();
@@ -727,6 +828,16 @@ async fn send_message(
             let mut last_thinking: u64 = 0;
             let mut stream_had_error = false;
 
+            // Clear any "stopped" marker left over from a PRIOR turn for this
+            // conversation — only a stop issued during this read window counts
+            // as "this turn was stopped". (Bounded cleanup: a stop that arrives
+            // after the previous turn already finished leaves a marker here that
+            // no task drained; we drop it now.)
+            {
+                let stopped = state_stopped_ref(&app_handle);
+                stopped.lock().await.remove(&conv_id);
+            }
+
             let result = read_persistent_turn(&engine_for_stream, stdout, |events| {
                 for evt in events {
                     if matches!(evt, NormalizedEvent::Error { .. }) {
@@ -750,14 +861,43 @@ async fn send_message(
             // is complete).
             kill_registry.lock().await.remove(&conv_id_after);
 
-            // If the stream failed, the persistent session is likely dead.
-            // Remove it so the next message will respawn.
+            // Was this turn intentionally stopped? stop_generation (or a
+            // mid-stream model change) sets the marker and has already killed +
+            // removed the session. A stopped turn must finalize SILENTLY: the
+            // frontend already marked the message done in stopGeneration, and
+            // emitting agent-error here would surface "persistent session stdout
+            // closed unexpectedly" (the EOF we read after the kill) while our
+            // error-cleanup could clobber a session a follow-up message just
+            // respawned — which is exactly why a stop used to make the next
+            // "start" fail with that error.
+            let was_stopped = state_stopped_ref(&app_handle)
+                .lock()
+                .await
+                .remove(&conv_id_after);
+            if was_stopped {
+                log::info!(
+                    "[send_message] persistent turn stopped by user for conv {}",
+                    conv_id_after
+                );
+                return;
+            }
+
+            // The stream failed unexpectedly (a real crash, not a stop): the
+            // session is likely dead. Remove it so the next message respawns —
+            // but only if the entry is actually dead. A LIVE entry here is a
+            // *different* session (the user already sent a follow-up that
+            // respawned), which we must never kill by accident.
             if result.is_err() || stream_had_error {
                 let sessions_map = state_sessions_ref(&app_handle);
                 let mut sessions = sessions_map.lock().await;
+                let mut dead = false;
                 if let Some(s) = sessions.get_mut(&conv_id_after) {
-                    s.kill().await;
-                    sessions.remove(&conv_id_after);
+                    dead = !s.is_alive();
+                }
+                if dead {
+                    if let Some(mut s) = sessions.remove(&conv_id_after) {
+                        s.kill().await;
+                    }
                 }
             }
 
@@ -941,6 +1081,12 @@ async fn send_message(
 /// This is needed inside spawned tasks where `state` is not available.
 fn state_sessions_ref(app: &AppHandle) -> SessionMap {
     app.state::<AppState>().sessions.clone()
+}
+
+/// Helper to get the stopped-conversation set from the AppHandle, for the same
+/// reason as `state_sessions_ref` (spawned tasks have no `state` parameter).
+fn state_stopped_ref(app: &AppHandle) -> StoppedSet {
+    app.state::<AppState>().stopped_convs.clone()
 }
 
 #[tauri::command]
@@ -1607,6 +1753,14 @@ async fn update_conversation_model(
                 "[set_conversation_model] killing persistent session for conv {} (model changed)",
                 conversation_id
             );
+            // Same rationale as stop_generation: if a turn is mid-stream when
+            // the model changes, mark it stopped so the streaming task
+            // finalizes silently on the kill-induced EOF instead of erroring.
+            state
+                .stopped_convs
+                .lock()
+                .await
+                .insert(conversation_id.clone());
             session.kill().await;
             sessions.remove(&conversation_id);
         }
@@ -1628,7 +1782,21 @@ async fn stop_generation(
     conversation_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    // First, check if this is a persistent session (Claude/CodeBuddy).
+    // First, check if this is a builtin engine session.
+    {
+        let mut sessions = state.builtin_sessions.lock().await;
+        if let Some(session) = sessions.get_mut(&conversation_id) {
+            log::info!(
+                "[stop_generation] cancelling builtin session for conv {}",
+                conversation_id
+            );
+            session.cancel();
+            sessions.remove(&conversation_id);
+            return Ok(());
+        }
+    }
+
+    // Then, check if this is a persistent session (Claude/CodeBuddy).
     {
         let mut sessions = state.sessions.lock().await;
         if let Some(session) = sessions.get_mut(&conversation_id) {
@@ -1636,9 +1804,22 @@ async fn stop_generation(
                 "[stop_generation] killing persistent session for conv {}",
                 conversation_id
             );
+            // Mark this turn as intentionally stopped BEFORE killing. The kill
+            // closes stdout, so the still-running streaming task's read returns
+            // EOF; without this marker it can't tell a deliberate stop from a
+            // crash and would emit "persistent session stdout closed
+            // unexpectedly" and tear down any session a follow-up message just
+            // respawned. Flag-first guarantees the marker is set before the EOF.
+            state
+                .stopped_convs
+                .lock()
+                .await
+                .insert(conversation_id.clone());
             // Kill the persistent process. The next message will respawn via --resume.
             session.kill().await;
             sessions.remove(&conversation_id);
+            // The PID is now stale; drop it so a later stop targets a respawn.
+            state.kill_registry.lock().await.remove(&conversation_id);
             return Ok(());
         }
     }
@@ -4128,6 +4309,8 @@ pub fn run() {
             pty_map: pty::init_pty_map(),
             kill_registry: Arc::new(Mutex::new(HashMap::new())),
             sessions: ps::init_session_map(),
+            builtin_sessions: init_builtin_sessions(),
+            stopped_convs: Arc::new(Mutex::new(HashSet::new())),
         })
         .on_window_event(|window, event| {
             // Close button hides to tray instead of quitting, so scheduled tasks keep firing.

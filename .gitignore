@@ -20,6 +20,9 @@ src-tauri/target/
 *.key
 .tauri/
 
+# CodeBuddy agent worktrees (local tool state)
+.codebuddy/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
