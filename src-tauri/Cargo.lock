@@ -3279,7 +3279,7 @@ dependencies = [
 
 [[package]]
 name = "pixie"
-version = "0.8.0-beta.2"
+version = "0.8.0-beta.3"
 dependencies = [
  "anyhow",
  "async-trait",
