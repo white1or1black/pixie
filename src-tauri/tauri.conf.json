@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Pixie",
-  "version": "0.8.0-beta.3",
+  "version": "0.8.0-beta.4",
   "identifier": "com.pixie.desktop",
   "build": {
     "frontendDist": "../dist",
@@ -57,6 +57,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY2QTU1NEFBREVBQjBEQTYKUldTbURhdmVxbFNsWmlOL2x4VWtxb2h4N2VKei9rODZvQUd4YTRSbXdRMDQwRDFGdytUOUI4TjYK",
       "endpoints": [
+        "https://github.com/white1or1black/pixie/releases/download/app-v0.8.0-beta.4/latest.json",
         "https://github.com/white1or1black/pixie/releases/latest/download/latest.json"
       ],
       "windows": {
